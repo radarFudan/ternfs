@@ -5,7 +5,6 @@
 #pragma once
 
 #include "Env.hpp"
-#include "LogsDB.hpp"
 #include "Metrics.hpp"
 #include "Msgs.hpp"
 #include "RegistryClient.hpp"

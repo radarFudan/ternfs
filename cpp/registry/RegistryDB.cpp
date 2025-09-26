@@ -10,10 +10,14 @@
 #include "Msgs.hpp"
 #include "MsgsGen.hpp"
 #include "RegistryDBData.hpp"
+#include "RegistryDBLogEntry.hpp"
 #include "RocksDBUtils.hpp"
 #include "Time.hpp"
 #include <rocksdb/db.h>
 #include <rocksdb/write_batch.h>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 static constexpr auto REGISTRY_CF_NAME = "registry";
 static constexpr auto LOCATIONS_CF_NAME = "locations";
@@ -128,7 +132,7 @@ static void wipeCdcPorts(rocksdb::WriteBatch& batch, rocksdb::DB* db, rocksdb::C
     delete it;
 }
 
-static void wipeBlockServicePorts(rocksdb::WriteBatch& batch, rocksdb::DB* db, 
+static void wipeBlockServicePorts(rocksdb::WriteBatch& batch, rocksdb::DB* db,
     rocksdb::ColumnFamilyHandle* blockServiceCf, rocksdb::ColumnFamilyHandle* writableBlockServiceCf, rocksdb::ColumnFamilyHandle* lastHeartBeatCf)
 {
     auto* it = db->NewIterator(rocksdb::ReadOptions(), blockServiceCf);
@@ -169,425 +173,429 @@ void RegistryDB::processLogEntries(std::vector<LogsDBLogEntry>& logEntries, std:
     for (auto &entry : logEntries) {
         ALWAYS_ASSERT(entry.idx == ++expectedLogEntry, "log entry index mismatch");
         BincodeBuf buf((char*)entry.value.data(), entry.value.size());
-        TernTime requestTime = buf.unpackScalar<uint64_t>();
-        lastRequestTime = std::max(lastRequestTime, requestTime);
-        RegistryReqContainer reqContainer;
-        reqContainer.unpack(buf);
+        RegistryDBLogEntry logEntry;
+        logEntry.unpack(buf);
         buf.ensureFinished();
-        auto& res = writeResults.emplace_back();
-        res.idx = entry.idx;
-        res.kind = reqContainer.kind();
-        res.err = TernError::NO_ERROR;
-        switch (res.kind) {
-        case RegistryMessageKind::CREATE_LOCATION: {
-            auto& req = reqContainer.getCreateLocation();
-            StaticValue<LocationInfoKey> key;
-            std::string value;
-            key().setLocationId(req.id);
-            auto status = _db->Get({}, _locationsCf, key.toSlice(), &value);
-            if (status != rocksdb::Status::NotFound()) {
-                ROCKS_DB_CHECKED(status);
-                res.err = TernError::LOCATION_EXISTS;
-                break;
-            }
-            LocationInfo newLocation;
-            newLocation.id = req.id;
-            newLocation.name = req.name;
-            writeLocationInfo(writeBatch, _locationsCf, newLocation);
-            initializeShardsForLocation(writeBatch, _shardsCf, req.id);
-            initializeCdcForLocation(writeBatch, _cdcCf, req.id);
-            toReload.locations = toReload.registry = toReload.shards = toReload.cdc = true;
-            break;
-        }
-        case RegistryMessageKind::RENAME_LOCATION: {
-            auto& req = reqContainer.getRenameLocation();
-            StaticValue<LocationInfoKey> key;
-            std::string value;
-            key().setLocationId(req.id);
-            auto status = _db->Get({}, _locationsCf, key.toSlice(), &value);
-            if (status == rocksdb::Status::NotFound()) {
-                LOG_DEBUG(_env, "unknown location in req %s", req);
-                res.err = TernError::LOCATION_NOT_FOUND;
-                break;
-            }
-            ROCKS_DB_CHECKED(status);
-            LocationInfo newLocation;
-            newLocation.id = req.id;
-            newLocation.name = req.name;
-            writeLocationInfo(writeBatch, _locationsCf, newLocation);
-            toReload.locations = true;
-            break;
-        }
-        case RegistryMessageKind::REGISTER_SHARD: {
-            auto& req = reqContainer.getRegisterShard();
-            StaticValue<ShardInfoKey> key;
-            std::string value;
-            key().setLocationId(req.location);
-            key().setReplicaId(req.shrid.replicaId());
-            key().setShardId(req.shrid.shardId().u8);
-            auto status = _db->Get({}, _shardsCf, key.toSlice(), &value);
-            if (status == rocksdb::Status::NotFound()) {
-                LOG_DEBUG(_env, "unknown shard replica in req %s", req);
-                res.err = TernError::INVALID_REPLICA;
-                break;
-            }
-            ROCKS_DB_CHECKED(status);
-            FullShardInfo info;
-            readShardInfo(key.toSlice(), value, info);
-            if (_options.enforceStableIp && (!addressesIntersect(info.addrs, req.addrs))) {
-                res.err = TernError::DIFFERENT_ADDRS_INFO;
-                break;
-            }
-            if (_options.enforceStableLeader && info.isLeader != req.isLeader) {
-                res.err = TernError::LEADER_PREEMPTED;
-                break;
-            }
-            StaticValue<LastHeartBeatKey> lastHeartBeat;
-            shardToLastHeartBeat(info, lastHeartBeat());
-            writeBatch.Delete(_lastHeartBeatCf, lastHeartBeat.toSlice());
-            info.isLeader = req.isLeader;
-            info.addrs = req.addrs;
-            info.lastSeen = requestTime;
-            shardToLastHeartBeat(info, lastHeartBeat());
-            writeBatch.Put(_lastHeartBeatCf, lastHeartBeat.toSlice(),{});
-            writeShardInfo(writeBatch, _shardsCf, info);
-            break;
-        }
-        case RegistryMessageKind::REGISTER_CDC:  {
-            auto& req = reqContainer.getRegisterCdc();
-            StaticValue<CdcInfoKey> key;
-            std::string value;
-            key().setLocationId(req.location);
-            key().setReplicaId(req.replica);
-            auto status = _db->Get({}, _cdcCf, key.toSlice(), &value);
-            if (status == rocksdb::Status::NotFound()) {
-                LOG_DEBUG(_env, "unknown cdc replica in req %s", req);
-                res.err = TernError::INVALID_REPLICA;
-                break;
-            }
-            ROCKS_DB_CHECKED(status);
-            CdcInfo info;
-            readCdcInfo(key.toSlice(), value, info);
-            if (_options.enforceStableIp && (!addressesIntersect(info.addrs, req.addrs))) {
-                res.err = TernError::DIFFERENT_ADDRS_INFO;
-                break;
-            }
-            if (_options.enforceStableLeader && info.isLeader != req.isLeader) {
-                res.err = TernError::LEADER_PREEMPTED;
-                break;
-            }
-            StaticValue<LastHeartBeatKey> lastHeartBeat;
-            cdcToLastHeartBeat(info, lastHeartBeat());
-            writeBatch.Delete(_lastHeartBeatCf, lastHeartBeat.toSlice());
-            info.isLeader = req.isLeader;
-            info.addrs = req.addrs;
-            info.lastSeen = requestTime;
-            cdcToLastHeartBeat(info, lastHeartBeat());
-            writeBatch.Put(_lastHeartBeatCf, lastHeartBeat.toSlice(),{});
-            writeCdcInfo(writeBatch, _cdcCf, info);
-            break;
-        }
-        case RegistryMessageKind::SET_BLOCK_SERVICE_FLAGS: {
-            auto& req = reqContainer.getSetBlockServiceFlags();
-            auto bsIt = updatedBlocks.find(req.id.u64);
-            FullBlockServiceInfo info;
-            StaticValue<BlockServiceInfoKey> key;
-            key().setId(req.id.u64);
-            if (bsIt == updatedBlocks.end()) {
+        auto requestTime = logEntry.entryTime;
+        lastRequestTime = std::max(lastRequestTime, requestTime);
+        uint8_t reqOffset = 0;
+        for (auto &reqContainer : logEntry.requests.els) {
+            auto& res = writeResults.emplace_back();
+            res.idx.logIdx = entry.idx;
+            res.idx.offset = reqOffset++;
+            res.kind = reqContainer.kind();
+            res.err = TernError::NO_ERROR;
+            switch (res.kind) {
+            case RegistryMessageKind::CREATE_LOCATION: {
+                auto& req = reqContainer.getCreateLocation();
+                StaticValue<LocationInfoKey> key;
                 std::string value;
-                auto status = _db->Get({}, _blockServicesCf, key.toSlice(), &value);
+                key().setLocationId(req.id);
+                auto status = _db->Get({}, _locationsCf, key.toSlice(), &value);
+                if (status != rocksdb::Status::NotFound()) {
+                    ROCKS_DB_CHECKED(status);
+                    res.err = TernError::LOCATION_EXISTS;
+                    break;
+                }
+                LocationInfo newLocation;
+                newLocation.id = req.id;
+                newLocation.name = req.name;
+                writeLocationInfo(writeBatch, _locationsCf, newLocation);
+                initializeShardsForLocation(writeBatch, _shardsCf, req.id);
+                initializeCdcForLocation(writeBatch, _cdcCf, req.id);
+                toReload.locations = toReload.registry = toReload.shards = toReload.cdc = true;
+                break;
+            }
+            case RegistryMessageKind::RENAME_LOCATION: {
+                auto& req = reqContainer.getRenameLocation();
+                StaticValue<LocationInfoKey> key;
+                std::string value;
+                key().setLocationId(req.id);
+                auto status = _db->Get({}, _locationsCf, key.toSlice(), &value);
                 if (status == rocksdb::Status::NotFound()) {
-                    LOG_DEBUG(_env, "unknown block service in req %s", req);
-                    res.err = TernError::BLOCK_SERVICE_NOT_FOUND;
+                    LOG_DEBUG(_env, "unknown location in req %s", req);
+                    res.err = TernError::LOCATION_NOT_FOUND;
                     break;
                 }
                 ROCKS_DB_CHECKED(status);
-                readBlockServiceInfo(key.toSlice(), value, info);
-            } else {
-                info = bsIt->second;
-            }
-            if ((info.flags & BlockServiceFlags::DECOMMISSIONED) != BlockServiceFlags::EMPTY) {
-                // no updates allowed to decomissioned services do nothing
+                LocationInfo newLocation;
+                newLocation.id = req.id;
+                newLocation.name = req.name;
+                writeLocationInfo(writeBatch, _locationsCf, newLocation);
+                toReload.locations = true;
                 break;
             }
-            if ((req.flags & BlockServiceFlags::DECOMMISSIONED & (BlockServiceFlags) req.flagsMask) != BlockServiceFlags::EMPTY) {
-                // no longer track staleness
+            case RegistryMessageKind::REGISTER_SHARD: {
+                auto& req = reqContainer.getRegisterShard();
+                StaticValue<ShardInfoKey> key;
+                std::string value;
+                key().setLocationId(req.location);
+                key().setReplicaId(req.shrid.replicaId());
+                key().setShardId(req.shrid.shardId().u8);
+                auto status = _db->Get({}, _shardsCf, key.toSlice(), &value);
+                if (status == rocksdb::Status::NotFound()) {
+                    LOG_DEBUG(_env, "unknown shard replica in req %s", req);
+                    res.err = TernError::INVALID_REPLICA;
+                    break;
+                }
+                ROCKS_DB_CHECKED(status);
+                FullShardInfo info;
+                readShardInfo(key.toSlice(), value, info);
+                if (_options.enforceStableIp && (!addressesIntersect(info.addrs, req.addrs))) {
+                    res.err = TernError::DIFFERENT_ADDRS_INFO;
+                    break;
+                }
+                if (_options.enforceStableLeader && info.isLeader != req.isLeader) {
+                    res.err = TernError::LEADER_PREEMPTED;
+                    break;
+                }
                 StaticValue<LastHeartBeatKey> lastHeartBeat;
-                blockServiceToLastHeartBeat(info, lastHeartBeat());
+                shardToLastHeartBeat(info, lastHeartBeat());
                 writeBatch.Delete(_lastHeartBeatCf, lastHeartBeat.toSlice());
-                // DECOMMISSIONED service looses other flags
-                info.flags = BlockServiceFlags::DECOMMISSIONED;
-            } else {
-                info.flags = (info.flags & ~(BlockServiceFlags)req.flagsMask) | (req.flags & (BlockServiceFlags) req.flagsMask);
+                info.isLeader = req.isLeader;
+                info.addrs = req.addrs;
+                info.lastSeen = requestTime;
+                shardToLastHeartBeat(info, lastHeartBeat());
+                writeBatch.Put(_lastHeartBeatCf, lastHeartBeat.toSlice(),{});
+                writeShardInfo(writeBatch, _shardsCf, info);
+                break;
             }
-            info.lastInfoChange = requestTime;
-            writeBlockServiceInfo(writeBatch, _blockServicesCf, info);
-            updatedBlocks[info.id.u64] = info;
-            break;
-        }
-        case RegistryMessageKind::REGISTER_BLOCK_SERVICES: {
-            auto& req = reqContainer.getRegisterBlockServices();
-            for(auto& newInfo : req.blockServices.els) {
-                auto bsIt = updatedBlocks.find(newInfo.id.u64);
+            case RegistryMessageKind::REGISTER_CDC:  {
+                auto& req = reqContainer.getRegisterCdc();
+                StaticValue<CdcInfoKey> key;
+                std::string value;
+                key().setLocationId(req.location);
+                key().setReplicaId(req.replica);
+                auto status = _db->Get({}, _cdcCf, key.toSlice(), &value);
+                if (status == rocksdb::Status::NotFound()) {
+                    LOG_DEBUG(_env, "unknown cdc replica in req %s", req);
+                    res.err = TernError::INVALID_REPLICA;
+                    break;
+                }
+                ROCKS_DB_CHECKED(status);
+                CdcInfo info;
+                readCdcInfo(key.toSlice(), value, info);
+                if (_options.enforceStableIp && (!addressesIntersect(info.addrs, req.addrs))) {
+                    res.err = TernError::DIFFERENT_ADDRS_INFO;
+                    break;
+                }
+                if (_options.enforceStableLeader && info.isLeader != req.isLeader) {
+                    res.err = TernError::LEADER_PREEMPTED;
+                    break;
+                }
+                StaticValue<LastHeartBeatKey> lastHeartBeat;
+                cdcToLastHeartBeat(info, lastHeartBeat());
+                writeBatch.Delete(_lastHeartBeatCf, lastHeartBeat.toSlice());
+                info.isLeader = req.isLeader;
+                info.addrs = req.addrs;
+                info.lastSeen = requestTime;
+                cdcToLastHeartBeat(info, lastHeartBeat());
+                writeBatch.Put(_lastHeartBeatCf, lastHeartBeat.toSlice(),{});
+                writeCdcInfo(writeBatch, _cdcCf, info);
+                break;
+            }
+            case RegistryMessageKind::SET_BLOCK_SERVICE_FLAGS: {
+                auto& req = reqContainer.getSetBlockServiceFlags();
+                auto bsIt = updatedBlocks.find(req.id.u64);
                 FullBlockServiceInfo info;
-                bool newService = false;
                 StaticValue<BlockServiceInfoKey> key;
-                key().setId(newInfo.id.u64);
+                key().setId(req.id.u64);
                 if (bsIt == updatedBlocks.end()) {
                     std::string value;
                     auto status = _db->Get({}, _blockServicesCf, key.toSlice(), &value);
                     if (status == rocksdb::Status::NotFound()) {
-                        info.id = newInfo.id;
-                        info.locationId = newInfo.locationId;
-                        info.addrs = newInfo.addrs;
-                        info.storageClass = newInfo.storageClass;
-                        info.failureDomain = newInfo.failureDomain;
-                        info.secretKey = newInfo.secretKey;
-                        info.flags = BlockServiceFlags::EMPTY;
-                        info.firstSeen = info.lastInfoChange = requestTime;
-                        info.hasFiles = false;
-                        info.path = newInfo.path;
-                        newService = true;
-                    } else {
-                        ROCKS_DB_CHECKED(status);
-                        readBlockServiceInfo(key.toSlice(), value, info);
+                        LOG_DEBUG(_env, "unknown block service in req %s", req);
+                        res.err = TernError::BLOCK_SERVICE_NOT_FOUND;
+                        break;
                     }
+                    ROCKS_DB_CHECKED(status);
+                    readBlockServiceInfo(key.toSlice(), value, info);
                 } else {
                     info = bsIt->second;
                 }
-                if (info.flags == BlockServiceFlags::DECOMMISSIONED) {
-                    // no updates to decommissioned services
-                    continue;
+                if ((info.flags & BlockServiceFlags::DECOMMISSIONED) != BlockServiceFlags::EMPTY) {
+                    // no updates allowed to decomissioned services do nothing
+                    break;
                 }
-                StaticValue<WritableBlockServiceKey> writableKey;
-                StaticValue<LastHeartBeatKey> lastHeartBeat;
-                bool wasWritable = false;
-                if (!newService) {
-                    if (isWritable(info.flags) && info.availableBytes > 0) {
-                        wasWritable = true;
-                        blockServiceToWritableBlockServiceKey(info, writableKey());
-                        writeBatch.Delete(_writableBlockServicesCf, writableKey.toSlice());
-                    }
+                if ((req.flags & BlockServiceFlags::DECOMMISSIONED & (BlockServiceFlags) req.flagsMask) != BlockServiceFlags::EMPTY) {
+                    // no longer track staleness
+                    StaticValue<LastHeartBeatKey> lastHeartBeat;
                     blockServiceToLastHeartBeat(info, lastHeartBeat());
                     writeBatch.Delete(_lastHeartBeatCf, lastHeartBeat.toSlice());
+                    // DECOMMISSIONED service looses other flags
+                    info.flags = BlockServiceFlags::DECOMMISSIONED;
+                } else {
+                    info.flags = (info.flags & ~(BlockServiceFlags)req.flagsMask) | (req.flags & (BlockServiceFlags) req.flagsMask);
                 }
-                if(info.addrs != newInfo.addrs) {
-                    info.addrs = newInfo.addrs;
-                    info.lastInfoChange = requestTime;
-                }
-                if ((info.flags & BlockServiceFlags::STALE) != BlockServiceFlags::EMPTY ) {
-                    info.flags = info.flags & ~BlockServiceFlags::STALE;
-                    info.lastInfoChange = requestTime;
-                }
-                info.lastSeen = requestTime;
-                info.capacityBytes = newInfo.capacityBytes;
-                info.availableBytes = newInfo.availableBytes;
-                info.blocks = newInfo.blocks;
-                bool nowWritable = false;
-                if (isWritable(info.flags) && info.availableBytes > 0 && (requestTime - info.firstSeen >= _options.blockServiceUsageDelay)) {
-                    nowWritable = true;
-                    blockServiceToWritableBlockServiceKey(info, writableKey());
-                    writeBatch.Put(_writableBlockServicesCf, writableKey.toSlice(), {});
-                }
-                if (wasWritable != nowWritable) {
-                    info.lastInfoChange = requestTime;
-                    writableChanged = true;
-                }
-                blockServiceToLastHeartBeat(info, lastHeartBeat());
-                writeBatch.Put(_lastHeartBeatCf, lastHeartBeat.toSlice(),{});
+                info.lastInfoChange = requestTime;
                 writeBlockServiceInfo(writeBatch, _blockServicesCf, info);
                 updatedBlocks[info.id.u64] = info;
+                break;
             }
-            break;
-        }
-        case RegistryMessageKind::REGISTER_REGISTRY: {
-            auto& req = reqContainer.getRegisterRegistry();
+            case RegistryMessageKind::REGISTER_BLOCK_SERVICES: {
+                auto& req = reqContainer.getRegisterBlockServices();
+                for(auto& newInfo : req.blockServices.els) {
+                    auto bsIt = updatedBlocks.find(newInfo.id.u64);
+                    FullBlockServiceInfo info;
+                    bool newService = false;
+                    StaticValue<BlockServiceInfoKey> key;
+                    key().setId(newInfo.id.u64);
+                    if (bsIt == updatedBlocks.end()) {
+                        std::string value;
+                        auto status = _db->Get({}, _blockServicesCf, key.toSlice(), &value);
+                        if (status == rocksdb::Status::NotFound()) {
+                            info.id = newInfo.id;
+                            info.locationId = newInfo.locationId;
+                            info.addrs = newInfo.addrs;
+                            info.storageClass = newInfo.storageClass;
+                            info.failureDomain = newInfo.failureDomain;
+                            info.secretKey = newInfo.secretKey;
+                            info.flags = BlockServiceFlags::EMPTY;
+                            info.firstSeen = info.lastInfoChange = requestTime;
+                            info.hasFiles = false;
+                            info.path = newInfo.path;
+                            newService = true;
+                        } else {
+                            ROCKS_DB_CHECKED(status);
+                            readBlockServiceInfo(key.toSlice(), value, info);
+                        }
+                    } else {
+                        info = bsIt->second;
+                    }
+                    if (info.flags == BlockServiceFlags::DECOMMISSIONED) {
+                        // no updates to decommissioned services
+                        continue;
+                    }
+                    StaticValue<WritableBlockServiceKey> writableKey;
+                    StaticValue<LastHeartBeatKey> lastHeartBeat;
+                    bool wasWritable = false;
+                    if (!newService) {
+                        if (isWritable(info.flags) && info.availableBytes > 0) {
+                            wasWritable = true;
+                            blockServiceToWritableBlockServiceKey(info, writableKey());
+                            writeBatch.Delete(_writableBlockServicesCf, writableKey.toSlice());
+                        }
+                        blockServiceToLastHeartBeat(info, lastHeartBeat());
+                        writeBatch.Delete(_lastHeartBeatCf, lastHeartBeat.toSlice());
+                    }
+                    if(info.addrs != newInfo.addrs) {
+                        info.addrs = newInfo.addrs;
+                        info.lastInfoChange = requestTime;
+                    }
+                    if ((info.flags & BlockServiceFlags::STALE) != BlockServiceFlags::EMPTY ) {
+                        info.flags = info.flags & ~BlockServiceFlags::STALE;
+                        info.lastInfoChange = requestTime;
+                    }
+                    info.lastSeen = requestTime;
+                    info.capacityBytes = newInfo.capacityBytes;
+                    info.availableBytes = newInfo.availableBytes;
+                    info.blocks = newInfo.blocks;
+                    bool nowWritable = false;
+                    if (isWritable(info.flags) && info.availableBytes > 0 && (requestTime - info.firstSeen >= _options.blockServiceUsageDelay)) {
+                        nowWritable = true;
+                        blockServiceToWritableBlockServiceKey(info, writableKey());
+                        writeBatch.Put(_writableBlockServicesCf, writableKey.toSlice(), {});
+                    }
+                    if (wasWritable != nowWritable) {
+                        info.lastInfoChange = requestTime;
+                        writableChanged = true;
+                    }
+                    blockServiceToLastHeartBeat(info, lastHeartBeat());
+                    writeBatch.Put(_lastHeartBeatCf, lastHeartBeat.toSlice(),{});
+                    writeBlockServiceInfo(writeBatch, _blockServicesCf, info);
+                    updatedBlocks[info.id.u64] = info;
+                }
+                break;
+            }
+            case RegistryMessageKind::REGISTER_REGISTRY: {
+                auto& req = reqContainer.getRegisterRegistry();
 
-            StaticValue<RegistryReplicaInfoKey> key;
-            std::string value;
-            key().setReplicaId(req.replicaId);
-            key().setLocationId(req.location);
-            auto status = _db->Get({}, _registryCf, key.toSlice(), &value);
-            if (status == rocksdb::Status::NotFound()) {
-                LOG_ERROR(_env, "unknown registry replica in req %s", req);
-                res.err = TernError::INVALID_REPLICA;
-                break;
-            }
-            ROCKS_DB_CHECKED(status);
-            FullRegistryInfo info;
-            readRegistryInfo(key.toSlice(), value, info);
-            if (_options.enforceStableIp && (!addressesIntersect(info.addrs, req.addrs))) {
-                res.err = TernError::DIFFERENT_ADDRS_INFO;
-                break;
-            }
-            if (_options.enforceStableLeader && info.isLeader != req.isLeader) {
-                res.err = TernError::LEADER_PREEMPTED;
-                break;
-            }
-            StaticValue<LastHeartBeatKey> lastHeartBeat;
-            registryToLastHeartBeat(info, lastHeartBeat());
-            writeBatch.Delete(_lastHeartBeatCf, lastHeartBeat.toSlice());
-            info.isLeader = req.isLeader;
-            info.addrs = req.addrs;
-            info.lastSeen = requestTime;
-            registryToLastHeartBeat(info, lastHeartBeat());
-            writeBatch.Put(_lastHeartBeatCf, lastHeartBeat.toSlice(),{});
-            writeRegistryInfo(writeBatch, _registryCf, info);
-            break;
-        }
-        case RegistryMessageKind::DECOMMISSION_BLOCK_SERVICE: {
-            auto& req = reqContainer.getDecommissionBlockService();
-            auto bsIt = updatedBlocks.find(req.id.u64);
-            FullBlockServiceInfo info;
-            StaticValue<BlockServiceInfoKey> key;
-            key().setId(req.id.u64);
-            if (bsIt == updatedBlocks.end()) {
+                StaticValue<RegistryReplicaInfoKey> key;
                 std::string value;
-                auto status = _db->Get({}, _blockServicesCf, key.toSlice(), &value);
+                key().setReplicaId(req.replicaId);
+                key().setLocationId(req.location);
+                auto status = _db->Get({}, _registryCf, key.toSlice(), &value);
                 if (status == rocksdb::Status::NotFound()) {
-                    LOG_ERROR(_env, "unknown block service in req %s", req);
-                    res.err = TernError::BLOCK_SERVICE_NOT_FOUND;
+                    LOG_ERROR(_env, "unknown registry replica in req %s", req);
+                    res.err = TernError::INVALID_REPLICA;
                     break;
                 }
                 ROCKS_DB_CHECKED(status);
-                readBlockServiceInfo(key.toSlice(), value, info);
-            } else {
-                info = bsIt->second;
-            }
-            if ((info.flags & BlockServiceFlags::DECOMMISSIONED) != BlockServiceFlags::EMPTY) {
-                // no updates allowed to decomissioned services do nothing
+                FullRegistryInfo info;
+                readRegistryInfo(key.toSlice(), value, info);
+                if (_options.enforceStableIp && (!addressesIntersect(info.addrs, req.addrs))) {
+                    res.err = TernError::DIFFERENT_ADDRS_INFO;
+                    break;
+                }
+                if (_options.enforceStableLeader && info.isLeader != req.isLeader) {
+                    res.err = TernError::LEADER_PREEMPTED;
+                    break;
+                }
+                StaticValue<LastHeartBeatKey> lastHeartBeat;
+                registryToLastHeartBeat(info, lastHeartBeat());
+                writeBatch.Delete(_lastHeartBeatCf, lastHeartBeat.toSlice());
+                info.isLeader = req.isLeader;
+                info.addrs = req.addrs;
+                info.lastSeen = requestTime;
+                registryToLastHeartBeat(info, lastHeartBeat());
+                writeBatch.Put(_lastHeartBeatCf, lastHeartBeat.toSlice(),{});
+                writeRegistryInfo(writeBatch, _registryCf, info);
                 break;
             }
-            if (isWritable(info.flags) && info.availableBytes > 0) {
-                StaticValue<WritableBlockServiceKey> writableKey;
-                writableChanged = true;
-                blockServiceToWritableBlockServiceKey(info, writableKey());
-                writeBatch.Delete(_writableBlockServicesCf, writableKey.toSlice());
-            }
-            // no longer track staleness
-            StaticValue<LastHeartBeatKey> lastHeartBeat;
-            blockServiceToLastHeartBeat(info, lastHeartBeat());
-            writeBatch.Delete(_lastHeartBeatCf, lastHeartBeat.toSlice());
+            case RegistryMessageKind::DECOMMISSION_BLOCK_SERVICE: {
+                auto& req = reqContainer.getDecommissionBlockService();
+                auto bsIt = updatedBlocks.find(req.id.u64);
+                FullBlockServiceInfo info;
+                StaticValue<BlockServiceInfoKey> key;
+                key().setId(req.id.u64);
+                if (bsIt == updatedBlocks.end()) {
+                    std::string value;
+                    auto status = _db->Get({}, _blockServicesCf, key.toSlice(), &value);
+                    if (status == rocksdb::Status::NotFound()) {
+                        LOG_ERROR(_env, "unknown block service in req %s", req);
+                        res.err = TernError::BLOCK_SERVICE_NOT_FOUND;
+                        break;
+                    }
+                    ROCKS_DB_CHECKED(status);
+                    readBlockServiceInfo(key.toSlice(), value, info);
+                } else {
+                    info = bsIt->second;
+                }
+                if ((info.flags & BlockServiceFlags::DECOMMISSIONED) != BlockServiceFlags::EMPTY) {
+                    // no updates allowed to decomissioned services do nothing
+                    break;
+                }
+                if (isWritable(info.flags) && info.availableBytes > 0) {
+                    StaticValue<WritableBlockServiceKey> writableKey;
+                    writableChanged = true;
+                    blockServiceToWritableBlockServiceKey(info, writableKey());
+                    writeBatch.Delete(_writableBlockServicesCf, writableKey.toSlice());
+                }
+                // no longer track staleness
+                StaticValue<LastHeartBeatKey> lastHeartBeat;
+                blockServiceToLastHeartBeat(info, lastHeartBeat());
+                writeBatch.Delete(_lastHeartBeatCf, lastHeartBeat.toSlice());
 
-            // DECOMMISSIONED service looses other flags
-            info.flags = BlockServiceFlags::DECOMMISSIONED;
-            info.lastInfoChange = requestTime;
-            writeBlockServiceInfo(writeBatch, _blockServicesCf, info);
-            updatedBlocks[info.id.u64] = info;
-            break;
-        }
-        case RegistryMessageKind::MOVE_SHARD_LEADER: {
-            auto& req = reqContainer.getMoveShardLeader();
-            StaticValue<ShardInfoKey> key;
-            std::string value;
-            key().setLocationId(req.location);
-            key().setReplicaId(req.shrid.replicaId());
-            key().setShardId(req.shrid.shardId().u8);
-            auto status = _db->Get({}, _shardsCf, key.toSlice(), &value);
-            if (status == rocksdb::Status::NotFound()) {
-                LOG_ERROR(_env, "unknown shard replica in req %s", req);
-                res.err = TernError::INVALID_REPLICA;
+                // DECOMMISSIONED service looses other flags
+                info.flags = BlockServiceFlags::DECOMMISSIONED;
+                info.lastInfoChange = requestTime;
+                writeBlockServiceInfo(writeBatch, _blockServicesCf, info);
+                updatedBlocks[info.id.u64] = info;
                 break;
             }
-            ROCKS_DB_CHECKED(status);
-            FullShardInfo info;
-            readShardInfo(key.toSlice(), value, info);
-            info.isLeader = true;
-            writeShardInfo(writeBatch, _shardsCf, info);
-            break;
-        }
-        case RegistryMessageKind::CLEAR_SHARD_INFO: {
-            auto& req = reqContainer.getClearShardInfo();
-            StaticValue<ShardInfoKey> key;
-            std::string value;
-            key().setLocationId(req.location);
-            key().setReplicaId(req.shrid.replicaId());
-            key().setShardId(req.shrid.shardId().u8);
-            auto status = _db->Get({}, _shardsCf, key.toSlice(), &value);
-            if (status == rocksdb::Status::NotFound()) {
-                LOG_ERROR(_env, "unknown shard replica in req %s", req);
-                res.err = TernError::INVALID_REPLICA;
-                break;
-            }
-            ROCKS_DB_CHECKED(status);
-            FullShardInfo info;
-            readShardInfo(key.toSlice(), value, info);
-            info.isLeader = false;
-            info.addrs.clear();
-            writeShardInfo(writeBatch, _shardsCf, info);
-            break;
-        }
-        case RegistryMessageKind::MOVE_CDC_LEADER: {
-            auto& req = reqContainer.getMoveCdcLeader();
-            StaticValue<CdcInfoKey> key;
-            std::string value;
-            key().setLocationId(req.location);
-            key().setReplicaId(req.replica);
-            auto status = _db->Get({}, _cdcCf, key.toSlice(), &value);
-            if (status == rocksdb::Status::NotFound()) {
-                LOG_ERROR(_env, "unknown cdc replica in req %s", req);
-                res.err = TernError::INVALID_REPLICA;
-                break;
-            }
-            ROCKS_DB_CHECKED(status);
-            CdcInfo info;
-            readCdcInfo(key.toSlice(), value, info);
-            info.isLeader = true;
-            writeCdcInfo(writeBatch, _cdcCf, info);
-            break;
-        }
-        case RegistryMessageKind::CLEAR_CDC_INFO: {
-            auto& req = reqContainer.getClearCdcInfo();
-            StaticValue<CdcInfoKey> key;
-            std::string value;
-            key().setLocationId(req.location);
-            key().setReplicaId(req.replica);
-            auto status = _db->Get({}, _cdcCf, key.toSlice(), &value);
-            if (status == rocksdb::Status::NotFound()) {
-                LOG_ERROR(_env, "unknown cdc replica in req %s", req);
-                res.err = TernError::INVALID_REPLICA;
-                break;
-            }
-            ROCKS_DB_CHECKED(status);
-            CdcInfo info;
-            readCdcInfo(key.toSlice(), value, info);
-            info.isLeader = false;
-            info.addrs.clear();
-            writeCdcInfo(writeBatch, _cdcCf, info);
-            break;
-        }
-        case RegistryMessageKind::UPDATE_BLOCK_SERVICE_PATH: {
-            auto& req = reqContainer.getUpdateBlockServicePath();
-            auto bsIt = updatedBlocks.find(req.id.u64);
-            FullBlockServiceInfo info;
-            StaticValue<BlockServiceInfoKey> key;
-            key().setId(req.id.u64);
-            if (bsIt == updatedBlocks.end()) {
+            case RegistryMessageKind::MOVE_SHARD_LEADER: {
+                auto& req = reqContainer.getMoveShardLeader();
+                StaticValue<ShardInfoKey> key;
                 std::string value;
-                auto status = _db->Get({}, _blockServicesCf, key.toSlice(), &value);
+                key().setLocationId(req.location);
+                key().setReplicaId(req.shrid.replicaId());
+                key().setShardId(req.shrid.shardId().u8);
+                auto status = _db->Get({}, _shardsCf, key.toSlice(), &value);
                 if (status == rocksdb::Status::NotFound()) {
-                    LOG_ERROR(_env, "unknown block service in req %s", req);
-                    res.err = TernError::BLOCK_SERVICE_NOT_FOUND;
+                    LOG_ERROR(_env, "unknown shard replica in req %s", req);
+                    res.err = TernError::INVALID_REPLICA;
                     break;
                 }
                 ROCKS_DB_CHECKED(status);
-                readBlockServiceInfo(key.toSlice(), value, info);
-            } else {
-                info = bsIt->second;
+                FullShardInfo info;
+                readShardInfo(key.toSlice(), value, info);
+                info.isLeader = true;
+                writeShardInfo(writeBatch, _shardsCf, info);
+                break;
             }
-            info.path = req.newPath;
-            writeBlockServiceInfo(writeBatch, _blockServicesCf, info);
-            updatedBlocks[info.id.u64] = info;
-            break;
-        }
-        default:
-            ALWAYS_ASSERT(false);
+            case RegistryMessageKind::CLEAR_SHARD_INFO: {
+                auto& req = reqContainer.getClearShardInfo();
+                StaticValue<ShardInfoKey> key;
+                std::string value;
+                key().setLocationId(req.location);
+                key().setReplicaId(req.shrid.replicaId());
+                key().setShardId(req.shrid.shardId().u8);
+                auto status = _db->Get({}, _shardsCf, key.toSlice(), &value);
+                if (status == rocksdb::Status::NotFound()) {
+                    LOG_ERROR(_env, "unknown shard replica in req %s", req);
+                    res.err = TernError::INVALID_REPLICA;
+                    break;
+                }
+                ROCKS_DB_CHECKED(status);
+                FullShardInfo info;
+                readShardInfo(key.toSlice(), value, info);
+                info.isLeader = false;
+                info.addrs.clear();
+                writeShardInfo(writeBatch, _shardsCf, info);
+                break;
+            }
+            case RegistryMessageKind::MOVE_CDC_LEADER: {
+                auto& req = reqContainer.getMoveCdcLeader();
+                StaticValue<CdcInfoKey> key;
+                std::string value;
+                key().setLocationId(req.location);
+                key().setReplicaId(req.replica);
+                auto status = _db->Get({}, _cdcCf, key.toSlice(), &value);
+                if (status == rocksdb::Status::NotFound()) {
+                    LOG_ERROR(_env, "unknown cdc replica in req %s", req);
+                    res.err = TernError::INVALID_REPLICA;
+                    break;
+                }
+                ROCKS_DB_CHECKED(status);
+                CdcInfo info;
+                readCdcInfo(key.toSlice(), value, info);
+                info.isLeader = true;
+                writeCdcInfo(writeBatch, _cdcCf, info);
+                break;
+            }
+            case RegistryMessageKind::CLEAR_CDC_INFO: {
+                auto& req = reqContainer.getClearCdcInfo();
+                StaticValue<CdcInfoKey> key;
+                std::string value;
+                key().setLocationId(req.location);
+                key().setReplicaId(req.replica);
+                auto status = _db->Get({}, _cdcCf, key.toSlice(), &value);
+                if (status == rocksdb::Status::NotFound()) {
+                    LOG_ERROR(_env, "unknown cdc replica in req %s", req);
+                    res.err = TernError::INVALID_REPLICA;
+                    break;
+                }
+                ROCKS_DB_CHECKED(status);
+                CdcInfo info;
+                readCdcInfo(key.toSlice(), value, info);
+                info.isLeader = false;
+                info.addrs.clear();
+                writeCdcInfo(writeBatch, _cdcCf, info);
+                break;
+            }
+            case RegistryMessageKind::UPDATE_BLOCK_SERVICE_PATH: {
+                auto& req = reqContainer.getUpdateBlockServicePath();
+                auto bsIt = updatedBlocks.find(req.id.u64);
+                FullBlockServiceInfo info;
+                StaticValue<BlockServiceInfoKey> key;
+                key().setId(req.id.u64);
+                if (bsIt == updatedBlocks.end()) {
+                    std::string value;
+                    auto status = _db->Get({}, _blockServicesCf, key.toSlice(), &value);
+                    if (status == rocksdb::Status::NotFound()) {
+                        LOG_ERROR(_env, "unknown block service in req %s", req);
+                        res.err = TernError::BLOCK_SERVICE_NOT_FOUND;
+                        break;
+                    }
+                    ROCKS_DB_CHECKED(status);
+                    readBlockServiceInfo(key.toSlice(), value, info);
+                } else {
+                    info = bsIt->second;
+                }
+                info.path = req.newPath;
+                writeBlockServiceInfo(writeBatch, _blockServicesCf, info);
+                updatedBlocks[info.id.u64] = info;
+                break;
+            }
+            default:
+                ALWAYS_ASSERT(false);
+            }
         }
     }
     writeLastAppliedLogEntry(writeBatch, _defaultCf, expectedLogEntry);
     ROCKS_DB_CHECKED(_db->Write({}, &writeBatch));
     writableChanged = _updateStaleBlockServices(lastRequestTime) || writableChanged;
-    _recalcualteShardBlockServices(writableChanged);
+    _recalculateShardBlockServices(writableChanged);
 }
 
 void RegistryDB::_initDb() {
@@ -608,16 +616,16 @@ void RegistryDB::_initDb() {
         rocksdb::WriteBatch batch;
         LOG_INFO(_env, "initializing last applied log entry");
         writeLastAppliedLogEntry(batch, _defaultCf, LogIdx(0));
-        
+
         LOG_INFO(_env, "initializing default location");
         LocationInfo defaultLocation;
         defaultLocation.id = DEFAULT_LOCATION;
         defaultLocation.name = "default";
         writeLocationInfo(batch, _locationsCf, defaultLocation);
-        
+
         LOG_INFO(_env, "initializing registries");
         initializeRegistries(batch, _registryCf);
-        
+
         LOG_INFO(_env, "initializing shards for default location");
         initializeShardsForLocation(batch, _shardsCf, defaultLocation.id);
 
@@ -638,7 +646,269 @@ void RegistryDB::_initDb() {
     }
 }
 
-void RegistryDB::_recalcualteShardBlockServices(bool writableChanged) {
+struct BlockServiceState {
+    uint32_t blockServiceIdx;
+    uint64_t availableBytes;
+};
+
+class FdStatus {
+public:
+    FdStatus(uint32_t id, std::vector<BlockServiceState>& services)
+        : _id(id), _services(services), _startOffset(_services.size()),
+        _endOffset(_services.size()), _nextToAssign(_services.size()), _assignLoopCount(0) {}
+
+    // we prioritize Fds that have been assigned less often, and then by the next service available bytes
+    bool operator<(const FdStatus& oth) const {
+        if (_assignLoopCount == oth._assignLoopCount) {
+            if (_services[_nextToAssign].availableBytes == oth._services[oth._nextToAssign].availableBytes) {
+                return _id < oth._id;
+            }
+            return oth._services[oth._nextToAssign].availableBytes < _services[_nextToAssign].availableBytes;
+        }
+        return _assignLoopCount < oth._assignLoopCount;
+    }
+    void addBlockService(BlockServiceState bs) {
+        _services.emplace_back(bs);
+        ++_endOffset;
+    }
+    uint32_t getNextBlockServiceIdx() {
+        uint32_t ret = _services[_nextToAssign].blockServiceIdx;
+        if (++_nextToAssign == _endOffset) {
+            _nextToAssign = _startOffset;
+            ++_assignLoopCount;
+        }
+        return ret;
+    }
+    uint32_t id() const { return _id; }
+private:
+    uint32_t _id;
+    std::vector<BlockServiceState>& _services;
+    uint32_t _startOffset;
+    uint32_t _endOffset;
+    uint32_t _nextToAssign;
+    uint32_t _assignLoopCount;
+};
+
+struct ShardFdKey {
+    ShardFdKey(uint32_t fdId, ShardId shardId) : raw((uint64_t)fdId << 32 | shardId.u8) {}
+    uint64_t raw;
+
+    bool operator==(const ShardFdKey& other) const {
+        return raw == other.raw;
+    }
+};
+
+template <>
+struct std::hash<ShardFdKey> {
+    std::size_t operator()(const ShardFdKey key) const {
+        return std::hash<uint64_t>{}(key.raw);
+    }
+};
+
+struct ShardBlockServiceCount {
+    uint32_t count;
+    ShardId shardId;
+    bool operator<(const ShardBlockServiceCount& oth) const {
+        if (count == oth.count) {
+            return shardId.u8 < oth.shardId.u8;
+        }
+        return count < oth.count;
+    }
+};
+
+static constexpr uint64_t LOW_CAPACITY_THRESHOLD = 500ULL * 1024 * 1024 * 1024; // 500GB
+
+struct BlockServiceAssignmentStats {
+    int blockServicesConsidered;
+    int maxBlockServicesPerShard;
+    int minBlockServicesPerShard;
+    int duplicateBlockServicesAssigned;
+    int maxTimesBlockServicePicked;
+    int minTimesBlockServicePicked;
+    int maxLowBlockCapacityBlockServicePicked;
+    int minLowBlockCapacityBlockServicePicked;
+};
+
+static BlockServiceAssignmentStats calculateBlockServicesForLocation(
+    const std::vector<BlockServiceInfoShort>& blockServices,
+    std::vector<FdStatus>& fdStatuses,
+    std::vector<BlockServiceState>& serviceStates,
+    std::unordered_map<uint8_t, std::vector<BlockServiceInfoShort>>& shardBlockServices)
+{
+    // Track statistics
+    std::unordered_map<uint32_t, int> blockServicePickCount;
+    std::unordered_map<uint32_t, int> lowCapacityPickCount;
+
+    auto cmp = []( const FdStatus* a, const FdStatus* b ) {
+        return *b < *a;
+    };
+    std::vector<FdStatus*> fdStatusPtrs;
+    fdStatusPtrs.reserve(fdStatuses.size());
+    for (auto& fdStatus : fdStatuses) {
+            fdStatusPtrs.push_back(&fdStatus);
+    }
+    std::priority_queue<FdStatus*,std::vector<FdStatus*>, decltype(cmp)> pq(cmp, std::move(fdStatusPtrs));
+    std::priority_queue<ShardBlockServiceCount> shardCounts;
+    std::unordered_set<ShardFdKey> shardFDUsed;
+    fdStatusPtrs.clear();
+    for (uint32_t shard = 0; shard < 256; ++shard) {
+        shardCounts.push({0, ShardId((uint8_t)shard)});
+    }
+
+    // Phase 1: Assign at least 18 block services per shard (one per FD)
+    uint32_t targetFailureDomains = std::min((uint32_t)18, (uint32_t)fdStatuses.size());
+
+    // Keep assigning in rounds until we reach the target or run out of services
+    while(!pq.empty()) {
+        // Get the shard with the fewest services
+        if (shardCounts.empty()) break;
+        auto shard = shardCounts.top();
+
+        // If the minimum has reached the target, we're done with phase 1
+        if (shard.count >= targetFailureDomains) break;
+
+        shardCounts.pop();
+
+        bool assigned = false;
+        std::vector<FdStatus*> triedFds;
+
+        // Try to find an FD that this shard hasn't used yet
+        while (!pq.empty()) {
+            auto* fdStatus = pq.top();
+            pq.pop();
+            triedFds.push_back(fdStatus);
+
+            auto shardFdKey = ShardFdKey(fdStatus->id(), shard.shardId);
+            if (shardFDUsed.find(shardFdKey) == shardFDUsed.end()) {
+                // Found unused (shard, FD) combination
+                shardFDUsed.insert(shardFdKey);
+                uint32_t serviceIdx = fdStatus->getNextBlockServiceIdx();
+                shardBlockServices[shard.shardId.u8].push_back(blockServices[serviceIdx]);
+                shard.count++;
+                assigned = true;
+
+                // Track statistics
+                blockServicePickCount[serviceIdx]++;
+                if (serviceStates[serviceIdx].availableBytes < LOW_CAPACITY_THRESHOLD) {
+                    lowCapacityPickCount[serviceIdx]++;
+                }
+
+                break;
+            }
+        }
+
+        // Return all tried FDs back to priority queue
+        for (auto* fds : triedFds) {
+            pq.push(fds);
+        }
+
+        // Put the shard back
+        shardCounts.push(shard);
+
+        // If we couldn't assign, all FDs have been exhausted for this shard
+        // Since this is the shard with minimum count, all other shards are also done
+        if (!assigned) {
+            break;
+        }
+    }
+
+    // Phase 2: Distribute remaining services evenly across all shards
+    while (!pq.empty() && !shardCounts.empty()) {
+        auto shard = shardCounts.top();
+        shardCounts.pop();
+
+        bool assigned = false;
+        std::vector<FdStatus*> triedFds;
+
+        while (!pq.empty()) {
+            auto* fdStatus = pq.top();
+            pq.pop();
+            triedFds.push_back(fdStatus);
+
+            auto shardFdKey = ShardFdKey(fdStatus->id(), shard.shardId);
+            if (shardFDUsed.find(shardFdKey) == shardFDUsed.end()) {
+                // Found unused (shard, FD) combination
+                shardFDUsed.insert(shardFdKey);
+                uint32_t serviceIdx = fdStatus->getNextBlockServiceIdx();
+                shardBlockServices[shard.shardId.u8].push_back(blockServices[serviceIdx]);
+                shard.count++;
+                assigned = true;
+
+                // Track statistics
+                blockServicePickCount[serviceIdx]++;
+                if (serviceStates[serviceIdx].availableBytes < LOW_CAPACITY_THRESHOLD) {
+                    lowCapacityPickCount[serviceIdx]++;
+                }
+
+                break;
+            }
+        }
+
+        // Return all tried FDs back to priority queue
+        for (auto* fds : triedFds) {
+            pq.push(fds);
+        }
+
+        if (assigned) {
+            shardCounts.push(shard);
+        } else {
+            // No more valid FD assignments possible for this shard
+            // Don't put it back in the queue
+        }
+    }
+
+    // Calculate statistics
+    BlockServiceAssignmentStats stats;
+    stats.blockServicesConsidered = blockServices.size();
+    stats.maxBlockServicesPerShard = 0;
+    stats.minBlockServicesPerShard = INT_MAX;
+    stats.duplicateBlockServicesAssigned = 0;
+    stats.maxTimesBlockServicePicked = 0;
+    stats.minTimesBlockServicePicked = INT_MAX;
+    stats.maxLowBlockCapacityBlockServicePicked = 0;
+    stats.minLowBlockCapacityBlockServicePicked = INT_MAX;
+
+    // Count per-shard stats
+    for (const auto& [shardId, shardServices] : shardBlockServices) {
+        int count = shardServices.size();
+        if (count > 0) {
+            stats.maxBlockServicesPerShard = std::max(stats.maxBlockServicesPerShard, count);
+            stats.minBlockServicesPerShard = std::min(stats.minBlockServicesPerShard, count);
+        }
+    }
+
+    // Count pick stats
+    for (const auto& [serviceIdx, pickCount] : blockServicePickCount) {
+        if (pickCount > 1) {
+            stats.duplicateBlockServicesAssigned++;
+        }
+        stats.maxTimesBlockServicePicked = std::max(stats.maxTimesBlockServicePicked, pickCount);
+        stats.minTimesBlockServicePicked = std::min(stats.minTimesBlockServicePicked, pickCount);
+    }
+
+    // Count low capacity pick stats
+    for (const auto& [serviceIdx, pickCount] : lowCapacityPickCount) {
+        stats.maxLowBlockCapacityBlockServicePicked = std::max(stats.maxLowBlockCapacityBlockServicePicked, pickCount);
+        stats.minLowBlockCapacityBlockServicePicked = std::min(stats.minLowBlockCapacityBlockServicePicked, pickCount);
+    }
+
+    // Handle edge cases where no services were picked
+    if (blockServicePickCount.empty()) {
+        stats.minTimesBlockServicePicked = 0;
+        stats.maxTimesBlockServicePicked = 0;
+    }
+    if (lowCapacityPickCount.empty()) {
+        stats.minLowBlockCapacityBlockServicePicked = 0;
+        stats.maxLowBlockCapacityBlockServicePicked = 0;
+    }
+    if (stats.minBlockServicesPerShard == INT_MAX) {
+        stats.minBlockServicesPerShard = 0;
+    }
+
+    return stats;
+}
+
+void RegistryDB::_recalculateShardBlockServices(bool writableChanged) {
     if (!writableChanged && (ternNow() - _lastCalculatedShardBlockServices < _options.writableBlockServiceUpdateInterval)) {
         return;
     }
@@ -649,15 +919,47 @@ void RegistryDB::_recalcualteShardBlockServices(bool writableChanged) {
 
     auto *it = _db->NewIterator(rocksdb::ReadOptions(), _writableBlockServicesCf);
     BincodeFixedBytes<16> lastFd;
-    lastFd.clear();
-    uint8_t lastStorageClass = 0;
-    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    LocationId lastLocation = 0;
+    uint8_t lastStorageClass = EMPTY_STORAGE;
+    std::vector<BlockServiceInfoShort> blockServiceInfos;
+    std::vector<BlockServiceState> serviceSpaceAvailable;
+    std::vector<FdStatus> fdStatuses;
+    FdStatus* currentFd;
+    // we want backwards iteration as we want services with more space available first
+    for (it->SeekToLast(); it->Valid(); it->Prev()) {
         auto writableKey = ExternalValue<WritableBlockServiceKey>::FromSlice(it->key());
-        if (lastFd == writableKey().failureDomain() && lastStorageClass == writableKey().storageClass()) {
-            continue;
+        if (lastLocation != writableKey().locationId() || lastStorageClass != writableKey().storageClass()) {
+            if (lastStorageClass != EMPTY_STORAGE) {
+                LOG_INFO(_env, "calculating shard block services for location %s storage class %s from %s writable block services in %s failure domains",
+                    lastLocation, storageClassName(lastStorageClass), blockServiceInfos.size(), fdStatuses.size());
+                if (fdStatuses.size() < 1) {
+                    LOG_INFO(_env, "no failure domains for location %s storage class %s",
+                        lastLocation, storageClassName(lastStorageClass));
+                } else {
+                    auto stats = calculateBlockServicesForLocation(blockServiceInfos, fdStatuses, serviceSpaceAvailable, _shardBlockServices);
+                    LOG_INFO(_env, "calculated shard block services for location %s storage class %s: "
+                        "considered %s, max/min per shard %s/%s, duplicates %s, "
+                        "max/min picks %s/%s, max/min low capacity picks %s/%s",
+                        lastLocation, storageClassName(lastStorageClass),
+                        stats.blockServicesConsidered,
+                        stats.maxBlockServicesPerShard, stats.minBlockServicesPerShard,
+                        stats.duplicateBlockServicesAssigned,
+                        stats.maxTimesBlockServicePicked, stats.minTimesBlockServicePicked,
+                        stats.maxLowBlockCapacityBlockServicePicked, stats.minLowBlockCapacityBlockServicePicked);
+                }
+            }
+
+            lastFd.clear();
+            lastLocation = writableKey().locationId();
+            lastStorageClass = writableKey().storageClass();
+            blockServiceInfos.clear();
+            serviceSpaceAvailable.clear();
+            fdStatuses.clear();
         }
-        lastFd = writableKey().failureDomain();
-        lastStorageClass = writableKey().storageClass();
+        if (lastFd != writableKey().failureDomain()) {
+            lastFd = writableKey().failureDomain();
+            currentFd = &fdStatuses.emplace_back( fdStatuses.size(), serviceSpaceAvailable);
+        }
         auto id = writableKey().id();
         StaticValue<BlockServiceInfoKey> key;
         key().setId(id);
@@ -666,14 +968,24 @@ void RegistryDB::_recalcualteShardBlockServices(bool writableChanged) {
         ROCKS_DB_CHECKED(status);
         FullBlockServiceInfo info;
         readBlockServiceInfo(key.toSlice(), value, info);
-        BlockServiceInfoShort bsShort;
+        auto& bsShort = blockServiceInfos.emplace_back();
         bsShort.id = id;
         bsShort.locationId = info.locationId;
         bsShort.failureDomain = info.failureDomain;
         bsShort.storageClass = info.storageClass;
-        for(int i = 0; i < 256; ++i) {
-            _shardBlockServices[(uint8_t) i].push_back(bsShort);
-        }
+        currentFd->addBlockService({(uint32_t)(blockServiceInfos.size() - 1), info.availableBytes});
+    }
+    if (lastStorageClass != EMPTY_STORAGE && fdStatuses.size() >= 1) {
+        auto stats = calculateBlockServicesForLocation(blockServiceInfos, fdStatuses, serviceSpaceAvailable, _shardBlockServices);
+        LOG_INFO(_env, "calculated shard block services for location %s storage class %s: "
+            "considered %s, max/min per shard %s/%s, duplicates %s, "
+            "max/min picks %s/%s, max/min low capacity picks %s/%s",
+            lastLocation, storageClassName(lastStorageClass),
+            stats.blockServicesConsidered,
+            stats.maxBlockServicesPerShard, stats.minBlockServicesPerShard,
+            stats.duplicateBlockServicesAssigned,
+            stats.maxTimesBlockServicePicked, stats.minTimesBlockServicePicked,
+            stats.maxLowBlockCapacityBlockServicePicked, stats.minLowBlockCapacityBlockServicePicked);
     }
     ROCKS_DB_CHECKED(it->status());
     delete it;
@@ -706,7 +1018,7 @@ bool RegistryDB::_updateStaleBlockServices(TernTime now) {
             writeBatch.Delete(_writableBlockServicesCf, writableKey.toSlice());
         }
         info.flags = info.flags | BlockServiceFlags::STALE;
-        writeBlockServiceInfo(writeBatch, _blockServicesCf, info); 
+        writeBlockServiceInfo(writeBatch, _blockServicesCf, info);
     }
     ROCKS_DB_CHECKED(it->status());
     delete it;

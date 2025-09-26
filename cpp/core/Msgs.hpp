@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <ostream>
+#include <string>
 
 #include "Assert.hpp"
 #include "Common.hpp"
@@ -410,6 +411,7 @@ constexpr uint8_t HDD_STORAGE = 2;
 constexpr uint8_t FLASH_STORAGE = 3;
 
 uint8_t storageClassByName(const char* name);
+std::string storageClassName(uint8_t storageClass);
 
 struct Crc {
     uint32_t u32;

@@ -6,6 +6,7 @@
 
 #include <atomic>
 
+#include "LogsDB.hpp"
 #include "Msgs.hpp"
 #include "PeriodicLoop.hpp"
 
@@ -33,7 +34,7 @@ public:
     }
 
     inline std::shared_ptr<std::array<AddrsInfo, LogsDB::REPLICA_COUNT>> replicas() {
-        return _replicas;
+        return std::atomic_load(&_replicas);
     }
 
     virtual bool periodicStep() override;

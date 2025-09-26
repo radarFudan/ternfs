@@ -2,9 +2,10 @@
 //
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+
 #include "Registerer.hpp"
 #include "LogsDB.hpp"
-#include <atomic>
 
 static std::ostream &operator<<(std::ostream &o, const std::vector<FullRegistryInfo> &replicas) {
   o << "[";
@@ -13,7 +14,6 @@ static std::ostream &operator<<(std::ostream &o, const std::vector<FullRegistryI
   }
   return o << "]";
 }
-
 
 void Registerer::_init(const std::vector<FullRegistryInfo> &cachedReplicas) {
     _env.updateAlert(_alert, "Waiting to register ourselves for the first time");

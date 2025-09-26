@@ -39,10 +39,14 @@ struct TempRegistryDB {
     }
 
     void close() {
-        db->close();
-        sharedDB->close();
-        db.reset();
-        sharedDB.reset();
+        if (db) {
+            db->close();
+            db.reset();
+        }
+        if (sharedDB) {
+            sharedDB->close();
+            sharedDB.reset();
+        }
     }
 
     ~TempRegistryDB() {
@@ -57,7 +61,6 @@ struct TempRegistryDB {
     }
 
     void initSharedDB() {
-        sharedDB->registerCFDescriptors({{rocksdb::kDefaultColumnFamilyName, {}}});
         sharedDB->registerCFDescriptors(RegistryDB::getColumnFamilyDescriptors());
         rocksdb::Options rocksDBOptions;
         rocksDBOptions.create_if_missing = true;

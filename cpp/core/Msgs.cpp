@@ -66,13 +66,25 @@ std::ostream& operator<<(std::ostream& out, Parity parity) {
     return out;
 }
 
+static constexpr std::array<std::string, 4> ALL_STORAGE_CLASS_NAMES = {
+    "EMPTY",
+    "INLINE",
+    "HDD",
+    "FLASH",
+};
+
 static const std::unordered_map<std::string, uint8_t> STORAGE_CLASSES_BY_NAME = {
-    {"HDD", 2},
-    {"FLASH", 3},
+    {ALL_STORAGE_CLASS_NAMES[EMPTY_STORAGE], EMPTY_STORAGE},
+    {ALL_STORAGE_CLASS_NAMES[INLINE_STORAGE], INLINE_STORAGE},
+    {ALL_STORAGE_CLASS_NAMES[HDD_STORAGE], HDD_STORAGE},
+    {ALL_STORAGE_CLASS_NAMES[FLASH_STORAGE], FLASH_STORAGE},
 };
 
 uint8_t storageClassByName(const char* name) {
     return STORAGE_CLASSES_BY_NAME.at(name);
+}
+std::string storageClassName(uint8_t storageClass) {
+    return ALL_STORAGE_CLASS_NAMES.at(storageClass);
 }
 
 std::ostream& operator<<(std::ostream& out, Crc crc) {

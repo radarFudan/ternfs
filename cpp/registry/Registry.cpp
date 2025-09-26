@@ -14,7 +14,6 @@
 
 #include "Assert.hpp"
 #include "Bincode.hpp"
-#include "Crypto.hpp"
 #include "Env.hpp"
 #include "ErrorCount.hpp"
 #include "LogsDB.hpp"
@@ -22,11 +21,12 @@
 #include "Msgs.hpp"
 #include "MsgsGen.hpp"
 
-#include "Registry.hpp"
 #include "Registerer.hpp"
+#include "Registry.hpp"
 #include "RegistryDB.hpp"
 #include "RegistryReader.hpp"
 #include "RegistryServer.hpp"
+#include "RegistryWriter.hpp"
 
 #include "SharedRocksDB.hpp"
 #include "Time.hpp"
@@ -70,13 +70,13 @@ public:
     RegistryLoop(
         Logger &logger, std::shared_ptr<XmonAgent> xmon, const RegistryOptions& options,
         Registerer& registerer, RegistryServer& server, LogsDB& logsDB, RegistryDB& registryDB,
-        std::vector<RegistryReader*> readers) :
+        std::vector<RegistryReader*> readers, RegistryWriter& writer) :
         Loop(logger, xmon, "server"),
         _options(options),
         _registerer(registerer),
         _server(server),
         _logsDB(logsDB),
-        _registryDB(registryDB),
+        _writer(writer),
         _replicas({}),
         _replicaFinishedBootstrap({}),
         _boostrapFinished(false),
@@ -93,7 +93,12 @@ public:
 
         auto now = ternNow();
 
-        _logsDB.processIncomingMessages(_server.receivedLogsDBRequests(), _server.receivedLogsDBResponses());
+
+        _writer.pushLogsDBResponses(_server.receivedLogsDBResponses());
+        _server.receivedLogsDBResponses().clear();
+
+        _writer.pushLogsDBRequests(_server.receivedLogsDBRequests());
+        _server.receivedLogsDBRequests().clear();
 
         auto& receivedRequests = _server.receivedRegistryRequests();
 
@@ -102,8 +107,7 @@ public:
                 _processBootstrapRequest(req);
                 continue;
             }
-            auto& resp = _registryResponses.emplace_back();
-            resp.requestId = req.requestId;
+
             if (unlikely(!_logsDB.isLeader())) {
                 LOG_DEBUG(_env, "not leader. dropping request from client %s", req.requestId);
                 continue;
@@ -127,76 +131,9 @@ public:
             case RegistryMessageKind::ERASE_DECOMMISSIONED_BLOCK:
             case RegistryMessageKind::ALL_BLOCK_SERVICES_DEPRECATED:{
                 _readRequests.emplace_back(std::move(req));
-                _registryResponses.pop_back();
                 break;
             }
-            case RegistryMessageKind::REGISTER_BLOCK_SERVICES: {
-                if (_logEntries.size() >= LogsDB::IN_FLIGHT_APPEND_WINDOW) {
-                    break;
-                }
-                bool failed = true;
-                //happy path. request fits in udp package and we don't want to copy
-                if (sizeof(now) + req.req.packedSize() <= LogsDB::DEFAULT_UDP_ENTRY_SIZE) {
-                    try {
-                        auto &entry = _logEntries.emplace_back();
-                        entry.value.resize(sizeof(now) + req.req.packedSize());
-                        ALWAYS_ASSERT(entry.value.size() <= LogsDB::DEFAULT_UDP_ENTRY_SIZE);
-                        BincodeBuf buf((char *)(&entry.value[0]), entry.value.size());
-                        buf.packScalar(now.ns);
-                        req.req.pack(buf);
-                        buf.ensureFinished();
-                        _entriesRequestIds.emplace_back(req.requestId);
-                        failed = false;
-                    } catch (BincodeException e) {
-                        LOG_ERROR(_env,"failed packing log entry request %s", e.what());
-                        _logEntries.pop_back();
-                    }
-                } else {
-                    std::vector<RegisterBlockServiceInfo> blockservices;
-                    blockservices = req.req.getRegisterBlockServices().blockServices.els;
-                    RegistryReqContainer tmpReqContainer;
-                    auto& tmpBsReq = tmpReqContainer.setRegisterBlockServices();
-                    while (!blockservices.empty()) {
-                        size_t currentSize = sizeof(now) + RegistryReqContainer::STATIC_SIZE;
-                        size_t toCopy = 0;
-                        for (auto bsIt = blockservices.rbegin(); bsIt != blockservices.rend(); ++bsIt) {
-                            currentSize += bsIt->packedSize();
-                            if (currentSize > LogsDB::DEFAULT_UDP_ENTRY_SIZE) {
-                                break;
-                            }
-                            ++toCopy;
-                        }
-                        tmpBsReq.blockServices.els.clear();
-                        tmpBsReq.blockServices.els.insert(
-                            tmpBsReq.blockServices.els.end(),blockservices.end() - toCopy,blockservices.end());
-                        blockservices.resize(blockservices.size() - toCopy);
-                        try {
-                            auto &entry = _logEntries.emplace_back();
-                            entry.value.resize(sizeof(now) + tmpReqContainer.packedSize());
-                            ALWAYS_ASSERT(entry.value.size() <= LogsDB::DEFAULT_UDP_ENTRY_SIZE);
-                            BincodeBuf buf((char *)(&entry.value[0]), entry.value.size());
-                            buf.packScalar(now.ns);
-                            tmpReqContainer.pack(buf);
-                            buf.ensureFinished();
-                            _entriesRequestIds.emplace_back(req.requestId);
-                            failed = false;
-                        } catch (BincodeException e) {
-                            LOG_ERROR(_env,"failed packing log entry request %s", e.what());
-                            _logEntries.pop_back();
-                            break;
-                        }
-                    }
-                }
-
-                if (!failed) {
-                    // we are not sending response yet. we can't leave empty response otherwise
-                    // server will drop connection
-                    _registryResponses.pop_back();
-                } else {
-                    LOG_ERROR(_env,"FAILED REGISTERING");
-                }
-                break;
-            }
+            case RegistryMessageKind::REGISTER_BLOCK_SERVICES:
             case RegistryMessageKind::DECOMMISSION_BLOCK_SERVICE:
             case RegistryMessageKind::CREATE_LOCATION:
             case RegistryMessageKind::RENAME_LOCATION:
@@ -209,146 +146,40 @@ public:
             case RegistryMessageKind::MOVE_CDC_LEADER:
             case RegistryMessageKind::CLEAR_CDC_INFO:
             case RegistryMessageKind::UPDATE_BLOCK_SERVICE_PATH: {
-                if (_logEntries.size() >= LogsDB::IN_FLIGHT_APPEND_WINDOW) {
-                    break;
-                }
-                try {
-                    auto &entry = _logEntries.emplace_back();
-                    entry.value.resize(sizeof(now) + req.req.packedSize());
-                    ALWAYS_ASSERT(entry.value.size() <= LogsDB::MAX_UDP_ENTRY_SIZE);
-                    BincodeBuf buf((char *)(&entry.value[0]), entry.value.size());
-                    buf.packScalar(now.ns);
-                    req.req.pack(buf);
-                    buf.ensureFinished();
-                    _entriesRequestIds.emplace_back(req.requestId);
-                    // we are not sending response yet. we can't leave empty response otherwise
-                    // server will drop connection
-                    _registryResponses.pop_back();
-                } catch (BincodeException e) {
-                    LOG_ERROR(_env,"failed packing log entry request %s", e.what());
-                    _logEntries.pop_back();
-                }
+                _writeRequests.emplace_back(std::move(req));
                 break;
             }
             case RegistryMessageKind::EMPTY:
             case RegistryMessageKind::ERROR:
+                auto& resp = _registryResponses.emplace_back();
+                resp.requestId = req.requestId;
                 break;
             }
         }
         receivedRequests.clear();
-        {
-            auto readReqBegin = _readRequests.begin();
-            auto readReqEnd = _readRequests.end();
-            for (size_t i = 0; i < _readers.size() && readReqBegin != readReqEnd; ++i) {
-                auto& reader = *_readers[i];
-                readReqBegin = reader.pushRequests(readReqBegin,readReqEnd);
-            }
-            for (;readReqBegin != readReqEnd; ++readReqBegin) {
-                auto& resp = _registryResponses.emplace_back();
-                resp.requestId = readReqBegin->requestId;
-            }
-            _readRequests.clear();
+
+
+        auto writeReqBegin = _writer.pushRegistryRequests(_writeRequests.begin(), _writeRequests.end());
+        for (;writeReqBegin != _writeRequests.end(); ++writeReqBegin) {
+            auto& resp = _registryResponses.emplace_back();
+            resp.requestId = writeReqBegin->requestId;
         }
+        _writeRequests.clear();
 
 
 
-        if (_logsDB.isLeader()) {
-            _logsDB.appendEntries(_logEntries);
-            for (int i = 0; i < _logEntries.size(); ++i) {
-                auto &entry = _logEntries[i];
-                auto requestId = _entriesRequestIds[i];
-                if (entry.idx == 0) {
-                    LOG_DEBUG(_env, "could not append entry for request %s", requestId);
-                    // empty response drops request
-                    _registryResponses.emplace_back().requestId = requestId;
-                    continue;
-                }
-                _logIdxToRequestId.emplace(entry.idx.u64, requestId);
-            }
-            _logEntries.clear();
-            _entriesRequestIds.clear();
+        auto readReqBegin = _readRequests.begin();
+        auto readReqEnd = _readRequests.end();
+        for (size_t i = 0; i < _readers.size() && readReqBegin != readReqEnd; ++i) {
+            auto& reader = *_readers[i];
+            readReqBegin = reader.pushRequests(readReqBegin,readReqEnd);
         }
-        ALWAYS_ASSERT(_logEntries.empty());
-        ALWAYS_ASSERT(_entriesRequestIds.empty());
-
-        do {
-            _logEntries.clear();
-            _logsDB.readEntries(_logEntries);
-            _registryDB.processLogEntries(_logEntries, _writeResults);
-        } while (!_logEntries.empty());
-
-        _logsDB.flush(true);
-
-        _logsDB.getOutgoingMessages(_logsDBOutRequests, _logsDBOutResponses);
-        LOG_TRACE(_env, "Sending %s log requests and %s log responses", _logsDBOutRequests.size(), _logsDBOutResponses.size());
-        _server.sendLogsDBMessages(_logsDBOutRequests, _logsDBOutResponses);
-
-
-        for (auto &writeResult : _writeResults) {
-            auto& regiResp = _registryResponses.emplace_back();
-            auto requestIdIt = _logIdxToRequestId.find(writeResult.idx.u64);
-            if (requestIdIt == _logIdxToRequestId.end()) {
-                _registryResponses.pop_back();
-                continue;
-            }
-
-            regiResp.requestId = requestIdIt->second;
-            RegistryRespContainer& resp = regiResp.resp;
-
-            if (writeResult.err != TernError::NO_ERROR) {
-                resp.setError() = writeResult.err;
-                continue;
-            }
-
-            switch (writeResult.kind) {
-            case RegistryMessageKind::ERROR:
-                resp.setError() = writeResult.err;
-                break;
-            case RegistryMessageKind::CREATE_LOCATION:
-                resp.setCreateLocation();
-                break;
-            case RegistryMessageKind::RENAME_LOCATION:
-                resp.setRenameLocation();
-                break;
-            case RegistryMessageKind::REGISTER_SHARD:
-                resp.setRegisterShard();
-                break;
-            case RegistryMessageKind::REGISTER_CDC:
-                resp.setRegisterCdc();
-                break;
-            case RegistryMessageKind::SET_BLOCK_SERVICE_FLAGS:
-                resp.setSetBlockServiceFlags();
-                break;
-            case RegistryMessageKind::REGISTER_BLOCK_SERVICES:
-                resp.setRegisterBlockServices();
-                break;
-            case RegistryMessageKind::REGISTER_REGISTRY:
-                resp.setRegisterRegistry();
-                break;
-            case RegistryMessageKind::DECOMMISSION_BLOCK_SERVICE:
-                resp.setDecommissionBlockService();
-                break;
-            case RegistryMessageKind::MOVE_SHARD_LEADER:
-                resp.setMoveShardLeader();
-                break;
-            case RegistryMessageKind::CLEAR_SHARD_INFO:
-                resp.setClearShardInfo();
-                break;
-            case RegistryMessageKind::MOVE_CDC_LEADER:
-                resp.setMoveCdcLeader();
-                break;
-            case RegistryMessageKind::CLEAR_CDC_INFO:
-                resp.setClearCdcInfo();
-                break;
-            case RegistryMessageKind::UPDATE_BLOCK_SERVICE_PATH:
-                resp.setUpdateBlockServicePath();
-                break;
-            default:
-                ALWAYS_ASSERT(false);
-                break;
-            }
+        for (;readReqBegin != readReqEnd; ++readReqBegin) {
+            auto& resp = _registryResponses.emplace_back();
+            resp.requestId = readReqBegin->requestId;
         }
-        _writeResults.clear();
+        _readRequests.clear();
+
         _server.sendRegistryResponses(_registryResponses);
         _registryResponses.clear();
     }
@@ -357,7 +188,7 @@ private:
     Registerer& _registerer;
     RegistryServer& _server;
     LogsDB& _logsDB;
-    RegistryDB& _registryDB;
+    RegistryWriter& _writer;
 
     std::array<AddrsInfo, LogsDB::REPLICA_COUNT> _replicas;
     std::array<bool, LogsDB::REPLICA_COUNT> _replicaFinishedBootstrap;
@@ -365,23 +196,11 @@ private:
 
     std::vector<RegistryReader*> _readers;
     std::vector<RegistryRequest> _readRequests;
+    std::vector<RegistryRequest> _writeRequests;
 
 
     std::vector<RegistryResponse> _registryResponses;
 
-
-    // buffer for reading/writing log entries
-    std::vector<LogsDBLogEntry> _logEntries;
-    std::vector<uint64_t> _entriesRequestIds;
-
-    std::vector<LogsDBRequest*> _logsDBOutRequests;
-    std::vector<LogsDBResponse> _logsDBOutResponses;
-
-    // keeping track which log entry corresponds to which request
-    std::unordered_map<uint64_t, uint64_t> _logIdxToRequestId;
-
-    // buffer for RegistryDB processLogEntries result
-    std::vector<RegistryDBWriteResult> _writeResults;
 
     void _processBootstrapRequest(RegistryRequest &req) {
         auto& resp = _registryResponses.emplace_back();
@@ -504,13 +323,18 @@ void Registry::start(const RegistryOptions& options, LoopThreads& threads) {
         threads.emplace_back(LoopThread::Spawn(std::move(reader)));
     }
 
+    auto writer = std::make_unique<RegistryWriter>(
+        logger, xmon, *_state->registryDB, *_state->server, *_state->logsDB);
+
     auto registerer = std::make_unique<Registerer>(
         logger, xmon, options, _state->server->boundAddresses(), cachedRegistries);
+
     auto registryLoop = std::make_unique<RegistryLoop>(
         logger, xmon, options, *registerer, *_state->server,
-        *_state->logsDB, *_state->registryDB, std::move(readers));
+        *_state->logsDB, *_state->registryDB, std::move(readers), *writer);
 
     threads.emplace_back(LoopThread::Spawn(std::move(registerer)));
+    threads.emplace_back(LoopThread::Spawn(std::move(writer)));
     threads.emplace_back(LoopThread::Spawn(std::move(registryLoop)));
 }
 

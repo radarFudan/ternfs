@@ -3,12 +3,10 @@
         "cpp/.**.d": true,
         "cpp/.**.o": true,
         "cpp/vgcore.*": true,
-        "cpp/eggs-shard": true,
         "cpp/.cache": true,
         "cpp/.mypy_cache": true,
-        "python/_crc32c*": true,
         "go/integrationtest/integrationtest": true,
-        "go/runeggs/runeggs": true,
+        "go/runtern/runtern": true,
         "go/gcdaemon/gcdaemon": true,
         "go/cli/cli": true,
         "kmod/*.cmd": true,
@@ -18,6 +16,7 @@
         "kmod/*.mod.c": true,
         "kmod/Module.symvers": true,
         "kmod/modules.order": true,
+        "tern-integrationtests.*": true,
     },
     "editor.formatOnSaveMode": "modifications"
 }

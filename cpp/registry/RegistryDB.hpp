@@ -10,10 +10,11 @@
 #include "Msgs.hpp"
 #include "MsgsGen.hpp"
 #include "RegistryCommon.hpp"
+#include "RegistryDBLogEntry.hpp"
 #include "SharedRocksDB.hpp"
 
 struct RegistryDBWriteResult {
-    LogIdx idx;
+    EntryReqIdx idx;
     RegistryMessageKind kind;
     TernError err;
 };
@@ -21,7 +22,7 @@ struct RegistryDBWriteResult {
 class RegistryDB {
 public:
     static std::vector<rocksdb::ColumnFamilyDescriptor> getColumnFamilyDescriptors();
-    
+
     RegistryDB(Logger& logger, std::shared_ptr<XmonAgent>& xmon, const RegistryOptions& options, const SharedRocksDB& sharedDB);
     ~RegistryDB() {}
     void close();
@@ -45,7 +46,7 @@ private:
     void _initDb();
 
     bool _updateStaleBlockServices(TernTime now);
-    void _recalcualteShardBlockServices(bool writableChanged);
+    void _recalculateShardBlockServices(bool writableChanged);
 
     const RegistryOptions& _options;
     Env _env;
