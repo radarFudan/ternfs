@@ -905,10 +905,10 @@ public:
             resp.id = req.msg.id;
             resp.body.setWaitStateApplied();
 
-            it = _waitStateRequests.erase(it);
             _inFlightRequestKeys.erase(InFlightRequestKey{req.msg.id, req.clientAddr});
 
             packShardResponse(_env, _shared, _shared.sock().addr(), _sender, dropArtificially, req, resp);
+            it = _waitStateRequests.erase(it);
         }
     }
 
