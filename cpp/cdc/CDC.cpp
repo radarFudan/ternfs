@@ -43,7 +43,6 @@ struct CDCShared {
     LogsDB& logsDB;
     std::array<UDPSocketPair, 2> socks;
     std::atomic<bool> isLeader;
-    std::shared_ptr<std::array<AddrsInfo, LogsDB::REPLICA_COUNT>> replicas;
     std::mutex shardsMutex;
     std::array<ShardInfo, 256> shards;
     // How long it took us to process the entire request, from parse to response.
@@ -58,6 +57,14 @@ struct CDCShared {
             timingsTotal[(int)kind] = Timings::Standard();
         }
     }
+    inline std::shared_ptr<const std::array<AddrsInfo, LogsDB::REPLICA_COUNT>> getReplicas()  {
+        return std::atomic_load(&_replicas);
+    }
+    inline void setReplicas(const std::array<AddrsInfo, LogsDB::REPLICA_COUNT>&& newReplicas)  {
+        std::atomic_store(&_replicas, std::make_shared<const std::array<AddrsInfo, LogsDB::REPLICA_COUNT>>(newReplicas));
+    }
+private:
+    std::shared_ptr<const std::array<AddrsInfo, LogsDB::REPLICA_COUNT>> _replicas;
 };
 
 struct InFlightShardRequest {
@@ -265,7 +272,7 @@ private:
     std::vector<LogsDBResponse> _logsDBOutResponses;
     std::unordered_map<uint64_t, CDCLogEntry> _inFlightLogEntries;
     std::unordered_map<uint64_t, std::vector<CDCReqInfo>> _logEntryIdxToReqInfos;
-    std::shared_ptr<std::array<AddrsInfo, LogsDB::REPLICA_COUNT>> _replicas;
+    std::shared_ptr<const std::array<AddrsInfo, LogsDB::REPLICA_COUNT>> _replicas;
 public:
     CDCServer(Logger& logger, std::shared_ptr<XmonAgent>& xmon, CDCOptions& options, CDCShared& shared) :
         Loop(logger, xmon, "req_server"),
@@ -303,7 +310,7 @@ public:
         _shardRespReqIds.clear();
         _receivedResponses.clear();
         _entryIdxToRespIds.clear();
-        _replicas = _shared.replicas;
+        _replicas = _shared.getReplicas();
 
 
         // Timeout ShardRequests
@@ -580,7 +587,7 @@ private:
         return _cdcReqs.size() + _shardResps.size();
     }
 
-    AddrsInfo* addressFromReplicaId(ReplicaId id) {
+    const AddrsInfo* addressFromReplicaId(ReplicaId id) {
         if (!_replicas) {
             return nullptr;
         }
@@ -936,7 +943,8 @@ public:
                 _env.updateAlert(_alert, "AddrsInfo in registry: %s , not matching local AddrsInfo: %s", replicas[_replicaId.u8], _shared.socks[CDC_SOCK].addr());
                 return false;
             }
-            if (unlikely(!_shared.replicas)) {
+            auto oldReplicas = _shared.getReplicas();
+            if (unlikely(!oldReplicas)) {
                 size_t emptyReplicas{0};
                 for (auto& replica : replicas) {
                     if (replica.addrs[0].port == 0) {
@@ -948,9 +956,9 @@ public:
                     return false;
                 }
             }
-            if (unlikely(!_shared.replicas || *_shared.replicas != replicas)) {
+            if (unlikely(!oldReplicas || *oldReplicas != replicas)) {
                 LOG_DEBUG(_env, "Updating replicas to %s %s %s %s %s", replicas[0], replicas[1], replicas[2], replicas[3], replicas[4]);
-                std::atomic_exchange(&_shared.replicas, std::make_shared<std::array<AddrsInfo, LogsDB::REPLICA_COUNT>>(replicas));
+                _shared.setReplicas(std::move(replicas));
             }
         }
         return true;
