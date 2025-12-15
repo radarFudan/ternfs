@@ -66,7 +66,7 @@ std::ostream& operator<<(std::ostream& out, Parity parity) {
     return out;
 }
 
-static constexpr std::array<std::string, 4> ALL_STORAGE_CLASS_NAMES = {
+static const std::array<std::string, 4> ALL_STORAGE_CLASS_NAMES = {
     "EMPTY",
     "INLINE",
     "HDD",
