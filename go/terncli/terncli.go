@@ -58,8 +58,12 @@ func usage() {
 		commandsStrs = append(commandsStrs, c)
 	}
 	slices.Sort(commandsStrs)
-	fmt.Fprintf(os.Stderr, "Usage: %v %v\n\n", os.Args[0], strings.Join(commandsStrs, "|"))
-	fmt.Fprintf(os.Stderr, "Global options:\n\n")
+	fmt.Fprintf(os.Stderr, "Usage: %v <command> [options]\n\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "Commands:\n")
+	for _, cmd := range commandsStrs {
+		fmt.Fprintf(os.Stderr, "  %s\n", cmd)
+	}
+	fmt.Fprintf(os.Stderr, "\nGlobal options:\n")
 	flag.PrintDefaults()
 }
 
