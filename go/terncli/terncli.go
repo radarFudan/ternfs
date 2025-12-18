@@ -961,7 +961,6 @@ func main() {
 	duPhysical := duCmd.Bool("physical", false, "Also measure physical space (slower)")
 	duSnapshot := duCmd.Bool("snapshot", false, "Also count snapshot files")
 	duWorkersPerSshard := duCmd.Int("workers-per-shard", 5, "")
-	duLocation := duCmd.Uint("location", 0, "Location for which to report size")
 	duPattern := duCmd.String("pattern", "", "If set only measure files matching this regex pattern")
 	duRun := func() {
 		re, err := regexp.Compile(*duPattern)
@@ -976,6 +975,13 @@ func main() {
 		var numSnapshotFiles uint64
 		var totalSnapshotLogicalSize uint64
 		var totalSnapshotPhysicalSize uint64
+
+		// Track physical size per (location, storage_class) when measuring physical space
+		type locClassKey struct {
+			location msgs.Location
+			storage  msgs.StorageClass
+		}
+		groupTotals := make(map[locClassKey]struct{ current uint64; snapshot uint64 })
 		histogram := timing.NewHistogram(256, 255, 1.15) // max: ~900PB
 		histoLogicalSizeBins := make([]uint64, 256)
 		histoPhysicalSizeBins := make([]uint64, 256)
@@ -1046,12 +1052,21 @@ func main() {
 							if span.Header.IsInline {
 								continue
 							}
+
 							locBody := span.Body.(*msgs.FetchedLocations)
-							for _, loc := range locBody.Locations {
-								if uint(loc.LocationId) != *duLocation {
-									continue
+							for idx, loc := range locBody.Locations {
+								physical := uint64(loc.CellSize) * uint64(loc.Parity.Blocks()) * uint64(loc.Stripes)
+								key := locClassKey{location: loc.LocationId, storage: loc.StorageClass}
+								entry := groupTotals[key]
+								if current {
+									entry.current += physical
+								} else {
+									entry.snapshot += physical
 								}
-								physicalSize += uint64(loc.CellSize) * uint64(loc.Parity.Blocks()) * uint64(loc.Stripes)
+								groupTotals[key] = entry
+								if idx == 0 {
+									physicalSize += physical
+								}
 							}
 						}
 						if fileSpansResp.NextOffset == 0 {
@@ -1082,6 +1097,13 @@ func main() {
 			panic(err)
 		}
 		printReport()
+		if *duPhysical {
+			l.Info("physical size per location and storage_class:")
+			for key, totals := range groupTotals {
+				l.Info("location=%v storage=%v current=%v snapshot=%v",
+					uint(key.location), key.storage.String(), formatSize(totals.current), formatSize(totals.snapshot))
+			}
+		}
 		if *duHisto != "" {
 			l.Info("writing size histogram to %q", *duHisto)
 			histoCsvBuf := bytes.NewBuffer([]byte{})
