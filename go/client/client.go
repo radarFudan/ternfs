@@ -959,7 +959,6 @@ type Client struct {
 	blockTimeout         *timing.ReqTimeouts
 	requestIdCounter     uint64
 	registryAddress      string
-	addrsRefreshTicker   *time.Ticker
 	addrsRefreshClose    chan (struct{})
 	registryConn         *RegistryConn
 
@@ -968,67 +967,77 @@ type Client struct {
 	blockServiceToFailureDomain map[msgs.BlockServiceId]msgs.FailureDomain
 }
 
-func (c *Client) refreshAddrs(log *log.Logger) error {
+func (c *Client) refreshAddrs() error {
 	var shardAddrs [256]msgs.AddrsInfo
 	var cdcAddrs msgs.AddrsInfo
+	log := c.registryConn.log
+	errMsg := ""
 	{
 		log.Info("Getting shard/CDC info from registry at '%v'", c.registryAddress)
 		resp, err := c.registryConn.Request(&msgs.LocalShardsReq{})
 		if err != nil {
-			return fmt.Errorf("could not request shards from registry: %w", err)
-		}
-		shards := resp.(*msgs.LocalShardsResp)
-		for i, shard := range shards.Shards {
-			if shard.Addrs.Addr1.Port == 0 {
-				return fmt.Errorf("shard %v not present in registry", i)
+			errMsg = fmt.Sprintf("could not request shards from registry: %v; ", err)
+		} else {
+			shards := resp.(*msgs.LocalShardsResp)
+			missingShardCount := 0
+			for i, shard := range shards.Shards {
+				if shard.Addrs.Addr1.Port == 0 {
+					missingShardCount++
+				}
+				shardAddrs[i] = shard.Addrs
 			}
-			shardAddrs[i] = shard.Addrs
+			if missingShardCount > 0 {
+				errMsg += fmt.Sprintf("registry is missing %v shard(s); ", missingShardCount)
+			}
 		}
 		resp, err = c.registryConn.Request(&msgs.LocalCdcReq{})
 		if err != nil {
-			return fmt.Errorf("could not request CDC from registry: %w", err)
+			errMsg += fmt.Sprintf("could not request CDC from registry: %v; ", err)
+		} else {
+			cdc := resp.(*msgs.LocalCdcResp)
+			if cdc.Addrs.Addr1.Port == 0 {
+				errMsg += "CDC not present in registry; "
+			}
+			cdcAddrs = cdc.Addrs
 		}
-		cdc := resp.(*msgs.LocalCdcResp)
-		if cdc.Addrs.Addr1.Port == 0 {
-			return fmt.Errorf("CDC not present in registry")
-		}
-		cdcAddrs = cdc.Addrs
+		c.SetAddrs(cdcAddrs, &shardAddrs)
 	}
-	c.SetAddrs(cdcAddrs, &shardAddrs)
+
 
 	fetchBlockServices := func() bool {
 		c.blockServicesLock.RLock()
 		defer c.blockServicesLock.RUnlock()
 		return c.fetchBlockServices
 	}()
-	if !fetchBlockServices {
-		return nil
-	}
-
-	blockServicesResp, err := c.registryConn.Request(&msgs.AllBlockServicesDeprecatedReq{})
-	if err != nil {
-		return fmt.Errorf("could not request block services from registry: %w", err)
-	}
-	blockServices := blockServicesResp.(*msgs.AllBlockServicesDeprecatedResp)
-	var blockServicesToAdd []msgs.BlacklistEntry
-	func() {
-
-		for _, bs := range blockServices.BlockServices {
-			if _, ok := c.blockServiceToFailureDomain[bs.Id]; !ok {
-				blockServicesToAdd = append(blockServicesToAdd, msgs.BlacklistEntry{bs.FailureDomain, bs.Id})
+	if fetchBlockServices {
+		blockServicesResp, err := c.registryConn.Request(&msgs.AllBlockServicesDeprecatedReq{})
+		if err != nil {
+			errMsg += fmt.Sprintf("could not request block services from registry: %v; ", err)
+		} else {
+			blockServices := blockServicesResp.(*msgs.AllBlockServicesDeprecatedResp)
+			var blockServicesToAdd []msgs.BlacklistEntry
+			func() {
+				for _, bs := range blockServices.BlockServices {
+					if _, ok := c.blockServiceToFailureDomain[bs.Id]; !ok {
+						blockServicesToAdd = append(blockServicesToAdd, msgs.BlacklistEntry{bs.FailureDomain, bs.Id})
+					}
+				}
+			}()
+			if len(blockServicesToAdd) > 0 {
+				func() {
+					c.blockServicesLock.Lock()
+					defer c.blockServicesLock.Unlock()
+					for _, bs := range blockServicesToAdd {
+						c.blockServiceToFailureDomain[bs.BlockService] = bs.FailureDomain
+					}
+				}()
 			}
 		}
-	}()
-	if len(blockServicesToAdd) > 0 {
-		func() {
-			c.blockServicesLock.Lock()
-			defer c.blockServicesLock.Unlock()
-			for _, bs := range blockServicesToAdd {
-				c.blockServiceToFailureDomain[bs.BlockService] = bs.FailureDomain
-			}
-		}()
 	}
-
+	if errMsg != "" {
+		return fmt.Errorf("could not refresh addresses: %v", errMsg)
+	}
+	log.Info("Successfully refreshed shard/CDC addresses from registry")
 	return nil
 }
 
@@ -1046,29 +1055,27 @@ func NewClient(
 	}
 	c.registryAddress = registryAddress
 	c.registryConn = MakeRegistryConn(log, registryTimeout, registryAddress, 1)
-	if err := c.refreshAddrs(log); err != nil {
-		c.registryConn.Close()
-		return nil, err
-	}
-	c.addrsRefreshTicker = time.NewTicker(time.Minute)
 	c.addrsRefreshClose = make(chan struct{})
-	addressRefreshAlert := log.NewNCAlert(5 * time.Minute)
+
 	go func() {
+		addressRefreshAlert := log.NewNCAlert(5 * time.Minute)
+		addrsRefreshTicker := time.NewTicker(time.Minute)
+		defer addrsRefreshTicker.Stop()
 
 		for {
+			if err := c.refreshAddrs(); err != nil {
+					log.RaiseNC(addressRefreshAlert, "%v", err)
+			} else {
+				log.ClearNC(addressRefreshAlert)
+			}
 			select {
 			case <-c.addrsRefreshClose:
 				return
-			case <-c.addrsRefreshTicker.C:
-				if err := c.refreshAddrs(log); err != nil {
-					log.RaiseNC(addressRefreshAlert, "could not refresh shard & cdc addresses: %v", err)
-				} else {
-					log.ClearNC(addressRefreshAlert)
-				}
+			case <-addrsRefreshTicker.C:
+				continue
 			}
 		}
 	}()
-
 	return c, nil
 }
 
@@ -1188,6 +1195,9 @@ func (c *Client) SetAddrs(
 	shardAddrs *[256]msgs.AddrsInfo,
 ) {
 	for i := 0; i < len(shardAddrs); i++ {
+		if shardAddrs[i].Addr1.Port == 0 && shardAddrs[i].Addr2.Port == 0 {
+			continue
+		}
 		atomic.StoreUint64(
 			&c.shardRawAddrs[i][0],
 			uint64(shardAddrs[i].Addr1.Port)<<32|uint64(shardAddrs[i].Addr1.Addrs[0])<<24|uint64(shardAddrs[i].Addr1.Addrs[1])<<16|uint64(shardAddrs[i].Addr1.Addrs[2])<<8|uint64(shardAddrs[i].Addr1.Addrs[3]),
@@ -1196,6 +1206,10 @@ func (c *Client) SetAddrs(
 			&c.shardRawAddrs[i][1],
 			uint64(shardAddrs[i].Addr2.Port)<<32|uint64(shardAddrs[i].Addr2.Addrs[0])<<24|uint64(shardAddrs[i].Addr2.Addrs[1])<<16|uint64(shardAddrs[i].Addr2.Addrs[2])<<8|uint64(shardAddrs[i].Addr2.Addrs[3]),
 		)
+	}
+
+	if cdcAddrs.Addr1.Port == 0 && cdcAddrs.Addr2.Port == 0 {
+		return
 	}
 
 	atomic.StoreUint64(
@@ -1210,7 +1224,6 @@ func (c *Client) SetAddrs(
 
 func (c *Client) Close() {
 	c.addrsRefreshClose <- struct{}{}
-	c.addrsRefreshTicker.Stop()
 	c.clientMetadata.close()
 	c.writeBlockProcessors.close()
 	c.fetchBlockProcessors.close()
@@ -1656,7 +1669,7 @@ func (c *Client) SetFetchBlockServices() {
 		c.fetchBlockServices = true
 	}()
 	if needToInitFetch {
-		c.refreshAddrs(c.registryConn.log)
+		c.refreshAddrs()
 	}
 }
 
