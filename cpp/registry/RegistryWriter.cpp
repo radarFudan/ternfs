@@ -81,9 +81,9 @@ void RegistryWriter::step() {
                     _logIdxToRequestId.emplace(entryIdx, requestId);
                 }
             }
-            _logEntries.clear();
-            _entriesRequestIds.clear();
         }
+        _logEntries.clear();
+        _entriesRequestIds.clear();
     } else {
         for (auto &req : _registryRequests) {
             auto& resp = _registryResponses.emplace_back();

@@ -644,6 +644,7 @@ void RegistryDB::_initDb() {
         wipeBlockServicePorts(batch, _db, _blockServicesCf, _writableBlockServicesCf, _lastHeartBeatCf);
         ROCKS_DB_CHECKED(_db->Write({}, &batch));
     }
+    _recalculateShardBlockServices(true);
 }
 
 struct BlockServiceState {
@@ -733,7 +734,8 @@ static BlockServiceAssignmentStats calculateBlockServicesForLocation(
     const std::vector<BlockServiceInfoShort>& blockServices,
     std::vector<FdStatus>& fdStatuses,
     std::vector<BlockServiceState>& serviceStates,
-    std::unordered_map<uint8_t, std::vector<BlockServiceInfoShort>>& shardBlockServices)
+    std::unordered_map<uint8_t, std::vector<BlockServiceInfoShort>>& shardBlockServices,
+    uint32_t maxFailureDomainsPerShard)
 {
     // Track statistics
     std::unordered_map<uint32_t, int> blockServicePickCount;
@@ -813,9 +815,14 @@ static BlockServiceAssignmentStats calculateBlockServicesForLocation(
     }
 
     // Phase 2: Distribute remaining services evenly across all shards
+    // Limit each shard to at most 50 block services per location/storage class
     while (!pq.empty() && !shardCounts.empty()) {
         auto shard = shardCounts.top();
         shardCounts.pop();
+
+        if (shard.count >= maxFailureDomainsPerShard) {
+            continue;
+        }
 
         bool assigned = false;
         std::vector<FdStatus*> triedFds;
@@ -931,16 +938,16 @@ void RegistryDB::_recalculateShardBlockServices(bool writableChanged) {
         if (lastLocation != writableKey().locationId() || lastStorageClass != writableKey().storageClass()) {
             if (lastStorageClass != EMPTY_STORAGE) {
                 LOG_INFO(_env, "calculating shard block services for location %s storage class %s from %s writable block services in %s failure domains",
-                    lastLocation, storageClassName(lastStorageClass), blockServiceInfos.size(), fdStatuses.size());
+                    (int)lastLocation, storageClassName(lastStorageClass), blockServiceInfos.size(), fdStatuses.size());
                 if (fdStatuses.size() < 1) {
                     LOG_INFO(_env, "no failure domains for location %s storage class %s",
-                        lastLocation, storageClassName(lastStorageClass));
+                        (int)lastLocation, storageClassName(lastStorageClass));
                 } else {
-                    auto stats = calculateBlockServicesForLocation(blockServiceInfos, fdStatuses, serviceSpaceAvailable, _shardBlockServices);
+                    auto stats = calculateBlockServicesForLocation(blockServiceInfos, fdStatuses, serviceSpaceAvailable, _shardBlockServices, _options.maxFailureDomainsPerShard);
                     LOG_INFO(_env, "calculated shard block services for location %s storage class %s: "
                         "considered %s, max/min per shard %s/%s, duplicates %s, "
                         "max/min picks %s/%s, max/min low capacity picks %s/%s",
-                        lastLocation, storageClassName(lastStorageClass),
+                        (int)lastLocation, storageClassName(lastStorageClass),
                         stats.blockServicesConsidered,
                         stats.maxBlockServicesPerShard, stats.minBlockServicesPerShard,
                         stats.duplicateBlockServicesAssigned,
@@ -976,11 +983,11 @@ void RegistryDB::_recalculateShardBlockServices(bool writableChanged) {
         currentFd->addBlockService({(uint32_t)(blockServiceInfos.size() - 1), info.availableBytes});
     }
     if (lastStorageClass != EMPTY_STORAGE && fdStatuses.size() >= 1) {
-        auto stats = calculateBlockServicesForLocation(blockServiceInfos, fdStatuses, serviceSpaceAvailable, _shardBlockServices);
+        auto stats = calculateBlockServicesForLocation(blockServiceInfos, fdStatuses, serviceSpaceAvailable, _shardBlockServices, _options.maxFailureDomainsPerShard);
         LOG_INFO(_env, "calculated shard block services for location %s storage class %s: "
             "considered %s, max/min per shard %s/%s, duplicates %s, "
             "max/min picks %s/%s, max/min low capacity picks %s/%s",
-            lastLocation, storageClassName(lastStorageClass),
+            (int)lastLocation, storageClassName(lastStorageClass),
             stats.blockServicesConsidered,
             stats.maxBlockServicesPerShard, stats.minBlockServicesPerShard,
             stats.duplicateBlockServicesAssigned,
@@ -1018,6 +1025,7 @@ bool RegistryDB::_updateStaleBlockServices(TernTime now) {
             writeBatch.Delete(_writableBlockServicesCf, writableKey.toSlice());
         }
         info.flags = info.flags | BlockServiceFlags::STALE;
+        info.lastInfoChange = now;
         writeBlockServiceInfo(writeBatch, _blockServicesCf, info);
     }
     ROCKS_DB_CHECKED(it->status());
