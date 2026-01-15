@@ -503,6 +503,48 @@ func main() {
 		run:   shardReqRun,
 	}
 
+	registryReqCmd := flag.NewFlagSet("registry-req", flag.ExitOnError)
+	registryReqKind := registryReqCmd.String("kind", "", "")
+	registryReqReq := registryReqCmd.String("req", "", "Request body, in JSON")
+	registryReqYes := registryReqCmd.Bool("yes", false, "Do not ask for confirmation")
+	registryReqRun := func() {
+		req, resp, err := msgs.MkRegistryMessage(*registryReqKind)
+		if err != nil {
+			panic(err)
+		}
+		if err := json.Unmarshal([]byte(*registryReqReq), &req); err != nil {
+			panic(fmt.Errorf("could not decode registry req: %w", err))
+		}
+		fmt.Printf("Will send this registry request: %T %+v\n", req, req)
+		if !*registryReqYes {
+			for {
+				var action string
+				fmt.Printf("Proceed? y/n ")
+				fmt.Scanln(&action)
+				if action == "y" {
+					break
+				}
+				if action == "n" {
+					fmt.Printf("BYE\n")
+					os.Exit(0)
+				}
+			}
+		}
+		if resp, err = getClient().RegistryRequest(l, req); err != nil {
+			panic(err)
+		}
+		out, err := json.MarshalIndent(resp, "", "  ")
+		if err != nil {
+			panic(fmt.Errorf("could not encode response %+v to json: %w", resp, err))
+		}
+		os.Stdout.Write(out)
+		fmt.Println()
+	}
+	commands["registry-req"] = commandSpec{
+		flags: registryReqCmd,
+		run:   registryReqRun,
+	}
+
 	cdcReqCmd := flag.NewFlagSet("cdc-req", flag.ExitOnError)
 	cdcReqKind := cdcReqCmd.String("kind", "", "")
 	cdcReqReq := cdcReqCmd.String("req", "", "Request body, in JSON")
