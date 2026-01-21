@@ -587,6 +587,9 @@ std::ostream& operator<<(std::ostream& out, RegistryMessageKind kind) {
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         out << "SET_BLOCK_SERVICE_HAS_FILES";
         break;
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        out << "BLOCK_SERVICES_NEEDING_MIGRATION";
+        break;
     case RegistryMessageKind::EMPTY:
         out << "EMPTY";
         break;
@@ -5266,6 +5269,42 @@ std::ostream& operator<<(std::ostream& out, const SetBlockServiceHasFilesResp& x
     return out;
 }
 
+void BlockServicesNeedingMigrationReq::pack(BincodeBuf& buf) const {
+    buf.packScalar<uint8_t>(locationId);
+}
+void BlockServicesNeedingMigrationReq::unpack(BincodeBuf& buf) {
+    locationId = buf.unpackScalar<uint8_t>();
+}
+void BlockServicesNeedingMigrationReq::clear() {
+    locationId = uint8_t(0);
+}
+bool BlockServicesNeedingMigrationReq::operator==(const BlockServicesNeedingMigrationReq& rhs) const {
+    if ((uint8_t)this->locationId != (uint8_t)rhs.locationId) { return false; };
+    return true;
+}
+std::ostream& operator<<(std::ostream& out, const BlockServicesNeedingMigrationReq& x) {
+    out << "BlockServicesNeedingMigrationReq(" << "LocationId=" << (int)x.locationId << ")";
+    return out;
+}
+
+void BlockServicesNeedingMigrationResp::pack(BincodeBuf& buf) const {
+    buf.packList<BlockServiceId>(blockServices);
+}
+void BlockServicesNeedingMigrationResp::unpack(BincodeBuf& buf) {
+    buf.unpackList<BlockServiceId>(blockServices);
+}
+void BlockServicesNeedingMigrationResp::clear() {
+    blockServices.clear();
+}
+bool BlockServicesNeedingMigrationResp::operator==(const BlockServicesNeedingMigrationResp& rhs) const {
+    if (blockServices != rhs.blockServices) { return false; };
+    return true;
+}
+std::ostream& operator<<(std::ostream& out, const BlockServicesNeedingMigrationResp& x) {
+    out << "BlockServicesNeedingMigrationResp(" << "BlockServices=" << x.blockServices << ")";
+    return out;
+}
+
 void FetchBlockReq::pack(BincodeBuf& buf) const {
     buf.packScalar<uint64_t>(blockId);
     buf.packScalar<uint32_t>(offset);
@@ -9073,6 +9112,15 @@ SetBlockServiceHasFilesReq& RegistryReqContainer::setSetBlockServiceHasFiles() {
     auto& x = _data.emplace<30>();
     return x;
 }
+const BlockServicesNeedingMigrationReq& RegistryReqContainer::getBlockServicesNeedingMigration() const {
+    ALWAYS_ASSERT(_kind == RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION, "%s != %s", _kind, RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION);
+    return std::get<31>(_data);
+}
+BlockServicesNeedingMigrationReq& RegistryReqContainer::setBlockServicesNeedingMigration() {
+    _kind = RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION;
+    auto& x = _data.emplace<31>();
+    return x;
+}
 RegistryReqContainer::RegistryReqContainer() {
     clear();
 }
@@ -9183,6 +9231,9 @@ void RegistryReqContainer::operator=(const RegistryReqContainer& other) {
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         setSetBlockServiceHasFiles() = other.getSetBlockServiceHasFiles();
         break;
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        setBlockServicesNeedingMigration() = other.getBlockServicesNeedingMigration();
+        break;
     default:
         throw TERN_EXCEPTION("bad RegistryMessageKind kind %s", other.kind());
     }
@@ -9258,6 +9309,8 @@ size_t RegistryReqContainer::packedSize() const {
         return sizeof(RegistryMessageKind) + std::get<29>(_data).packedSize();
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         return sizeof(RegistryMessageKind) + std::get<30>(_data).packedSize();
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        return sizeof(RegistryMessageKind) + std::get<31>(_data).packedSize();
     default:
         throw TERN_EXCEPTION("bad RegistryMessageKind kind %s", _kind);
     }
@@ -9358,6 +9411,9 @@ void RegistryReqContainer::pack(BincodeBuf& buf) const {
         break;
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         std::get<30>(_data).pack(buf);
+        break;
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        std::get<31>(_data).pack(buf);
         break;
     default:
         throw TERN_EXCEPTION("bad RegistryMessageKind kind %s", _kind);
@@ -9460,6 +9516,9 @@ void RegistryReqContainer::unpack(BincodeBuf& buf) {
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         _data.emplace<30>().unpack(buf);
         break;
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        _data.emplace<31>().unpack(buf);
+        break;
     default:
         throw BINCODE_EXCEPTION("bad RegistryMessageKind kind %s", _kind);
     }
@@ -9531,6 +9590,8 @@ bool RegistryReqContainer::operator==(const RegistryReqContainer& other) const {
         return getUpdateBlockServicePath() == other.getUpdateBlockServicePath();
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         return getSetBlockServiceHasFiles() == other.getSetBlockServiceHasFiles();
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        return getBlockServicesNeedingMigration() == other.getBlockServicesNeedingMigration();
     default:
         throw BINCODE_EXCEPTION("bad RegistryMessageKind kind %s", _kind);
     }
@@ -9630,6 +9691,9 @@ std::ostream& operator<<(std::ostream& out, const RegistryReqContainer& x) {
         break;
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         out << x.getSetBlockServiceHasFiles();
+        break;
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        out << x.getBlockServicesNeedingMigration();
         break;
     case RegistryMessageKind::EMPTY:
         out << "EMPTY";
@@ -9928,6 +9992,15 @@ SetBlockServiceHasFilesResp& RegistryRespContainer::setSetBlockServiceHasFiles()
     auto& x = _data.emplace<31>();
     return x;
 }
+const BlockServicesNeedingMigrationResp& RegistryRespContainer::getBlockServicesNeedingMigration() const {
+    ALWAYS_ASSERT(_kind == RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION, "%s != %s", _kind, RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION);
+    return std::get<32>(_data);
+}
+BlockServicesNeedingMigrationResp& RegistryRespContainer::setBlockServicesNeedingMigration() {
+    _kind = RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION;
+    auto& x = _data.emplace<32>();
+    return x;
+}
 RegistryRespContainer::RegistryRespContainer() {
     clear();
 }
@@ -10041,6 +10114,9 @@ void RegistryRespContainer::operator=(const RegistryRespContainer& other) {
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         setSetBlockServiceHasFiles() = other.getSetBlockServiceHasFiles();
         break;
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        setBlockServicesNeedingMigration() = other.getBlockServicesNeedingMigration();
+        break;
     default:
         throw TERN_EXCEPTION("bad RegistryMessageKind kind %s", other.kind());
     }
@@ -10118,6 +10194,8 @@ size_t RegistryRespContainer::packedSize() const {
         return sizeof(RegistryMessageKind) + std::get<30>(_data).packedSize();
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         return sizeof(RegistryMessageKind) + std::get<31>(_data).packedSize();
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        return sizeof(RegistryMessageKind) + std::get<32>(_data).packedSize();
     default:
         throw TERN_EXCEPTION("bad RegistryMessageKind kind %s", _kind);
     }
@@ -10221,6 +10299,9 @@ void RegistryRespContainer::pack(BincodeBuf& buf) const {
         break;
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         std::get<31>(_data).pack(buf);
+        break;
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        std::get<32>(_data).pack(buf);
         break;
     default:
         throw TERN_EXCEPTION("bad RegistryMessageKind kind %s", _kind);
@@ -10326,6 +10407,9 @@ void RegistryRespContainer::unpack(BincodeBuf& buf) {
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         _data.emplace<31>().unpack(buf);
         break;
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        _data.emplace<32>().unpack(buf);
+        break;
     default:
         throw BINCODE_EXCEPTION("bad RegistryMessageKind kind %s", _kind);
     }
@@ -10399,6 +10483,8 @@ bool RegistryRespContainer::operator==(const RegistryRespContainer& other) const
         return getUpdateBlockServicePath() == other.getUpdateBlockServicePath();
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         return getSetBlockServiceHasFiles() == other.getSetBlockServiceHasFiles();
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        return getBlockServicesNeedingMigration() == other.getBlockServicesNeedingMigration();
     default:
         throw BINCODE_EXCEPTION("bad RegistryMessageKind kind %s", _kind);
     }
@@ -10501,6 +10587,9 @@ std::ostream& operator<<(std::ostream& out, const RegistryRespContainer& x) {
         break;
     case RegistryMessageKind::SET_BLOCK_SERVICE_HAS_FILES:
         out << x.getSetBlockServiceHasFiles();
+        break;
+    case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION:
+        out << x.getBlockServicesNeedingMigration();
         break;
     case RegistryMessageKind::EMPTY:
         out << "EMPTY";

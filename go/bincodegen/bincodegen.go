@@ -2031,6 +2031,11 @@ func main() {
 			reflect.TypeOf(msgs.SetBlockServiceHasFilesReq{}),
 			reflect.TypeOf(msgs.SetBlockServiceHasFilesResp{}),
 		},
+		{
+			0x27,
+			reflect.TypeOf(msgs.BlockServicesNeedingMigrationReq{}),
+			reflect.TypeOf(msgs.BlockServicesNeedingMigrationResp{}),
+		},
 	}...)
 
 	kernelBlocksReqResps := []reqRespType{

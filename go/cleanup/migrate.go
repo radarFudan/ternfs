@@ -601,9 +601,10 @@ type migrator struct {
 	stopC                     chan bool
 	logOnly             bool
 	failureDomainFilter string
+	locationId          msgs.Location
 }
 
-func Migrator(registryAddress string, log *log.Logger, client *client.Client, numMigrators uint64, migratorIdx uint64, numParallelFiles uint32, logOnly bool, failureDomain string) *migrator {
+func Migrator(registryAddress string, log *log.Logger, client *client.Client, numMigrators uint64, migratorIdx uint64, numParallelFiles uint32, logOnly bool, failureDomain string, locationId msgs.Location) *migrator {
 	res := migrator{
 		registryAddress,
 		log,
@@ -622,7 +623,9 @@ func Migrator(registryAddress string, log *log.Logger, client *client.Client, nu
 		make(chan MigrateStats, 10),
 		make(chan bool),
 		logOnly,
-		failureDomain}
+		failureDomain,
+		locationId,
+	}
 	for i := range len(res.fileFetchers) {
 		res.fileFetchers[i] = make(chan msgs.BlockServiceId, 500)
 	}
@@ -654,26 +657,30 @@ OUT:
 		}
 		m.cleanVisitedBlockService()
 		m.log.Debug("requesting block services")
-		blockServicesResp, err := client.RegistryRequest(m.log, nil, m.registryAddress, &msgs.AllBlockServicesDeprecatedReq{})
+		blockServicesResp, err := m.client.RegistryRequest(m.log, &msgs.BlockServicesNeedingMigrationReq{LocationId: m.locationId})
 		if err != nil {
 			m.log.RaiseNC(registryResponseAlert, "error getting block services from registry: %v", err)
 		} else {
 			m.log.ClearNC(registryResponseAlert)
-			blockServices := blockServicesResp.(*msgs.AllBlockServicesDeprecatedResp)
+			blockServices := blockServicesResp.(*msgs.BlockServicesNeedingMigrationResp)
+			scheduled := make(map[msgs.BlockServiceId]any)
 			for _, bs := range blockServices.BlockServices {
-
-				if m.failureDomainFilter != "" && (bs.FailureDomain.String() != m.failureDomainFilter) {
-					continue
+				if failureDomain, ok := m.client.GetFailureDomainForBlockService(bs); ok {
+					if m.failureDomainFilter != "" && failureDomain.String() != m.failureDomainFilter {
+						continue
+					}
 				}
-
-				if bs.Flags.HasAny(msgs.TERNFS_BLOCK_SERVICE_DECOMMISSIONED) && bs.HasFiles {
-					m.ScheduleBlockService(bs.Id)
-				} else {
-					m.blockServicesLock.Lock()
-					delete(m.scheduledBlockServices, bs.Id)
-					m.blockServicesLock.Unlock()
+				scheduled[bs] = nil
+				m.ScheduleBlockService(bs)
+			}
+			m.blockServicesLock.Lock()
+			for bs := range m.scheduledBlockServices {
+				if _, ok := scheduled[bs]; !ok {
+					m.log.Info("unscheduling block service %v", bs)
+					delete(m.scheduledBlockServices, bs)
 				}
 			}
+			m.blockServicesLock.Unlock()
 		}
 	}
 	m.log.Debug("stop received waiting for fetchers to stop")

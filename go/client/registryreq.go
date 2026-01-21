@@ -122,6 +122,8 @@ func readRegistryResponse(
 		resp = &msgs.ShardBlockServicesResp{}
 	case msgs.UPDATE_BLOCK_SERVICE_PATH:
 		resp = &msgs.UpdateBlockServicePathResp{}
+	case msgs.BLOCK_SERVICES_NEEDING_MIGRATION:
+		resp = &msgs.BlockServicesNeedingMigrationResp{}
 	default:
 		return nil, fmt.Errorf("bad registry response kind %v", kind)
 	}

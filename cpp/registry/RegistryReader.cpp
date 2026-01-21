@@ -135,6 +135,12 @@ void RegistryReader::step() {
             registryResp.blockServices.els = _allBlockServices();
             break;
         }
+        case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION: {
+            auto &registryResp = resp.resp.setBlockServicesNeedingMigration();
+            auto &migrationReq = req.req.getBlockServicesNeedingMigration();
+            registryResp.blockServices.els = _blockServicesNeedingMigration(migrationReq.locationId);
+            break;
+        }
         default:
             ALWAYS_ASSERT(false, "unexpected request kind %s", req.req.kind());
         }
@@ -270,6 +276,17 @@ InfoResp RegistryReader::_info() {
 std::vector<BlockServiceDeprecatedInfo> RegistryReader::_allBlockServices() {
     _populateBlockServiceCache();
     return _cachedAllBlockServices;
+}
+
+std::vector<BlockServiceId> RegistryReader::_blockServicesNeedingMigration(LocationId location) {
+    _populateBlockServiceCache();
+    std::vector<BlockServiceId> res;
+    for (auto& bs : _cachedBlockServices) {
+        if (bs.locationId == location && bs.flags == BlockServiceFlags::DECOMMISSIONED && bs.hasFiles) {
+            res.push_back(bs.id);
+        }
+    }
+    return res;
 }
 
 std::vector<BlockService> RegistryReader::_changedBlockServices(LocationId location, TernTime changedSince) {

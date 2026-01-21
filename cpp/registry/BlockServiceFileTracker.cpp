@@ -6,6 +6,7 @@
 #include "Assert.hpp"
 #include "Env.hpp"
 #include "MsgsGen.hpp"
+#include <unistd.h>
 
 BlockServiceFileTracker::BlockServiceFileTracker(Logger& logger, std::shared_ptr<XmonAgent>& xmon, const RegistryOptions& options, RegistryDB& db, RegistryServer& server, RegistryWriter& writer) :
     Loop(logger, xmon, "file_tracker"),

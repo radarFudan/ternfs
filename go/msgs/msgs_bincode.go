@@ -879,6 +879,8 @@ func (k RegistryMessageKind) String() string {
 		return "UPDATE_BLOCK_SERVICE_PATH"
 	case 38:
 		return "SET_BLOCK_SERVICE_HAS_FILES"
+	case 39:
+		return "BLOCK_SERVICES_NEEDING_MIGRATION"
 	default:
 		return fmt.Sprintf("RegistryMessageKind(%d)", k)
 	}
@@ -916,6 +918,7 @@ const (
 	CLEAR_CDC_INFO                      RegistryMessageKind = 0x24
 	UPDATE_BLOCK_SERVICE_PATH           RegistryMessageKind = 0x25
 	SET_BLOCK_SERVICE_HAS_FILES         RegistryMessageKind = 0x26
+	BLOCK_SERVICES_NEEDING_MIGRATION    RegistryMessageKind = 0x27
 )
 
 var AllRegistryMessageKind = [...]RegistryMessageKind{
@@ -950,9 +953,10 @@ var AllRegistryMessageKind = [...]RegistryMessageKind{
 	CLEAR_CDC_INFO,
 	UPDATE_BLOCK_SERVICE_PATH,
 	SET_BLOCK_SERVICE_HAS_FILES,
+	BLOCK_SERVICES_NEEDING_MIGRATION,
 }
 
-const MaxRegistryMessageKind RegistryMessageKind = 38
+const MaxRegistryMessageKind RegistryMessageKind = 39
 
 func MkRegistryMessage(k string) (RegistryRequest, RegistryResponse, error) {
 	switch {
@@ -1018,6 +1022,8 @@ func MkRegistryMessage(k string) (RegistryRequest, RegistryResponse, error) {
 		return &UpdateBlockServicePathReq{}, &UpdateBlockServicePathResp{}, nil
 	case k == "SET_BLOCK_SERVICE_HAS_FILES":
 		return &SetBlockServiceHasFilesReq{}, &SetBlockServiceHasFilesResp{}, nil
+	case k == "BLOCK_SERVICES_NEEDING_MIGRATION":
+		return &BlockServicesNeedingMigrationReq{}, &BlockServicesNeedingMigrationResp{}, nil
 	default:
 		return nil, nil, fmt.Errorf("bad kind string %s", k)
 	}
@@ -6635,6 +6641,55 @@ func (v *SetBlockServiceHasFilesResp) Pack(w io.Writer) error {
 }
 
 func (v *SetBlockServiceHasFilesResp) Unpack(r io.Reader) error {
+	return nil
+}
+
+func (v *BlockServicesNeedingMigrationReq) RegistryRequestKind() RegistryMessageKind {
+	return BLOCK_SERVICES_NEEDING_MIGRATION
+}
+
+func (v *BlockServicesNeedingMigrationReq) Pack(w io.Writer) error {
+	if err := bincode.PackScalar(w, uint8(v.LocationId)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (v *BlockServicesNeedingMigrationReq) Unpack(r io.Reader) error {
+	if err := bincode.UnpackScalar(r, (*uint8)(&v.LocationId)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (v *BlockServicesNeedingMigrationResp) RegistryResponseKind() RegistryMessageKind {
+	return BLOCK_SERVICES_NEEDING_MIGRATION
+}
+
+func (v *BlockServicesNeedingMigrationResp) Pack(w io.Writer) error {
+	len1 := len(v.BlockServices)
+	if err := bincode.PackLength(w, len1); err != nil {
+		return err
+	}
+	for i := 0; i < len1; i++ {
+		if err := bincode.PackScalar(w, uint64(v.BlockServices[i])); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (v *BlockServicesNeedingMigrationResp) Unpack(r io.Reader) error {
+	var len1 int
+	if err := bincode.UnpackLength(r, &len1); err != nil {
+		return err
+	}
+	bincode.EnsureLength(&v.BlockServices, len1)
+	for i := 0; i < len1; i++ {
+		if err := bincode.UnpackScalar(r, (*uint64)(&v.BlockServices[i])); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

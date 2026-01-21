@@ -135,7 +135,8 @@ public:
             case RegistryMessageKind::SHARD_BLOCK_SERVICES:
             case RegistryMessageKind::ALL_CDC:
             case RegistryMessageKind::ERASE_DECOMMISSIONED_BLOCK:
-            case RegistryMessageKind::ALL_BLOCK_SERVICES_DEPRECATED:{
+            case RegistryMessageKind::ALL_BLOCK_SERVICES_DEPRECATED:
+            case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION: {
                 _readRequests.emplace_back(std::move(req));
                 break;
             }
