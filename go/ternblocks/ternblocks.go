@@ -1118,26 +1118,23 @@ Options:`
 	flag.PrintDefaults()
 }
 
-func retrieveOrCreateKey(log *log.Logger, dir string) [16]byte {
+func retrieveOrCreateKey(log *log.Logger, dir string) ([16]byte, error) {
 	var err error
 	var keyFile *os.File
 	keyFilePath := path.Join(dir, "secret.key")
 	keyFile, err = os.OpenFile(keyFilePath, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "could not open key file %v: %v\n", keyFilePath, err)
-		os.Exit(1)
+		return [16]byte{}, fmt.Errorf("could not open or create key file %v: %v", keyFilePath, err)
 	}
 	keyFile.Seek(0, 0)
 	if err := syscall.Flock(int(keyFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		fmt.Fprintf(os.Stderr, "could not lock key file %v: %v\n", keyFilePath, err)
-		os.Exit(1)
+		return [16]byte{}, fmt.Errorf("could not lock key file %v: %v", keyFilePath, err)
 	}
 	var key [16]byte
 	var read int
 	read, err = keyFile.Read(key[:])
 	if err != nil && err != io.EOF {
-		fmt.Fprintf(os.Stderr, "could not read key file %v: %v\n", keyFilePath, err)
-		os.Exit(1)
+		return [16]byte{}, fmt.Errorf("could not read key file %v: %v", keyFilePath, err)
 	}
 	if err == io.EOF {
 		log.Info("creating new secret key")
@@ -1153,21 +1150,21 @@ func retrieveOrCreateKey(log *log.Logger, dir string) [16]byte {
 		}
 		log.Info("creating directory structure")
 		if err := os.Mkdir(path.Join(dir, "with_crc"), 0755); err != nil && !os.IsExist(err) {
-			panic(fmt.Errorf("failed to create folder %s error: %v", path.Join(dir, "with_crc"), err))
+			return [16]byte{}, fmt.Errorf("failed to create folder %s error: %v", path.Join(dir, "with_crc"), err)
 		}
 	} else if read != 16 {
-		panic(fmt.Errorf("short secret key (%v rather than 16 bytes)", read))
+		return [16]byte{}, fmt.Errorf("short secret key (%v rather than 16 bytes)", read)
 	} else {
 		expectedKeyCrc := crc32c.Sum(0, key[:])
 		var actualKeyCrc uint32
 		if err := binary.Read(keyFile, binary.LittleEndian, &actualKeyCrc); err != nil {
-			panic(err)
+			return [16]byte{}, fmt.Errorf("could not read crc from key file %v: %v", keyFilePath, err)
 		}
 		if expectedKeyCrc != actualKeyCrc {
-			panic(fmt.Errorf("expected crc %v, got %v", msgs.Crc(expectedKeyCrc), msgs.Crc(actualKeyCrc)))
+			return [16]byte{}, fmt.Errorf("expected crc %v, got %v", msgs.Crc(expectedKeyCrc), msgs.Crc(actualKeyCrc))
 		}
 	}
-	return key
+	return key, nil
 }
 
 type diskStats struct {
@@ -1571,6 +1568,7 @@ func main() {
 	}
 
 	blockServices := make(map[msgs.BlockServiceId]*blockService)
+	var failedBlockServiceCount int
 	for i := 0; i < flag.NArg(); i += 2 {
 		dir := flag.Args()[i]
 		storageClass := msgs.StorageClassFromString(flag.Args()[i+1])
@@ -1578,7 +1576,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Storage class cannot be EMPTY/INLINE")
 			os.Exit(2)
 		}
-		key := retrieveOrCreateKey(l, dir)
+		key, err := retrieveOrCreateKey(l, dir)
+		if err != nil {
+			l.RaiseAlert("%v", err)
+			failedBlockServiceCount++
+			continue
+		}
 		id := blockServiceIdFromKey(key)
 		cipher, err := aes.NewCipher(key[:])
 		if err != nil {
@@ -1603,7 +1606,7 @@ func main() {
 		l.Info("block service %v at %v, storage class %v", id, blockService.path, blockService.storageClass)
 	}
 
-	if len(blockServices) != flag.NArg()/2 {
+	if len(blockServices) + failedBlockServiceCount != flag.NArg()/2 {
 		panic(fmt.Errorf("duplicate block services"))
 	}
 
