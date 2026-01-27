@@ -23,7 +23,7 @@ std::pair<int, std::string> fetchBlockServices(
     uint16_t registryPort,
     Duration timeout,
     ShardId shid,
-    std::vector<BlockServiceDeprecatedInfo>& blockServices,
+    std::vector<FullBlockServiceInfo>& blockServices,
     std::vector<BlockServiceInfoShort>& currentBlockServices
 );
 

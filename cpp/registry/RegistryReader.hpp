@@ -63,6 +63,7 @@ private:
     void _populateBlockServiceCache();
     InfoResp _info();
     std::vector<BlockServiceDeprecatedInfo> _allBlockServices();
+    std::vector<FullBlockServiceInfo> _allBlockServicesFull();
     std::vector<BlockServiceId> _blockServicesNeedingMigration(LocationId location);
     std::vector<BlockService> _changedBlockServices(LocationId location, TernTime changedSince);
     bool _eraseBlock(const EraseDecommissionedBlockReq& req, BincodeFixedBytes<8>& proof);

@@ -871,6 +871,8 @@ func (k RegistryMessageKind) String() string {
 		return "ERASE_DECOMMISSIONED_BLOCK"
 	case 33:
 		return "ALL_BLOCK_SERVICES_DEPRECATED"
+	case 40:
+		return "ALL_BLOCK_SERVICES"
 	case 35:
 		return "MOVE_CDC_LEADER"
 	case 36:
@@ -914,6 +916,7 @@ const (
 	ALL_CDC                             RegistryMessageKind = 0x19
 	ERASE_DECOMMISSIONED_BLOCK          RegistryMessageKind = 0x20
 	ALL_BLOCK_SERVICES_DEPRECATED       RegistryMessageKind = 0x21
+	ALL_BLOCK_SERVICES                  RegistryMessageKind = 0x28
 	MOVE_CDC_LEADER                     RegistryMessageKind = 0x23
 	CLEAR_CDC_INFO                      RegistryMessageKind = 0x24
 	UPDATE_BLOCK_SERVICE_PATH           RegistryMessageKind = 0x25
@@ -949,6 +952,7 @@ var AllRegistryMessageKind = [...]RegistryMessageKind{
 	ALL_CDC,
 	ERASE_DECOMMISSIONED_BLOCK,
 	ALL_BLOCK_SERVICES_DEPRECATED,
+	ALL_BLOCK_SERVICES,
 	MOVE_CDC_LEADER,
 	CLEAR_CDC_INFO,
 	UPDATE_BLOCK_SERVICE_PATH,
@@ -956,7 +960,7 @@ var AllRegistryMessageKind = [...]RegistryMessageKind{
 	BLOCK_SERVICES_NEEDING_MIGRATION,
 }
 
-const MaxRegistryMessageKind RegistryMessageKind = 39
+const MaxRegistryMessageKind RegistryMessageKind = 40
 
 func MkRegistryMessage(k string) (RegistryRequest, RegistryResponse, error) {
 	switch {
@@ -1014,6 +1018,8 @@ func MkRegistryMessage(k string) (RegistryRequest, RegistryResponse, error) {
 		return &EraseDecommissionedBlockReq{}, &EraseDecommissionedBlockResp{}, nil
 	case k == "ALL_BLOCK_SERVICES_DEPRECATED":
 		return &AllBlockServicesDeprecatedReq{}, &AllBlockServicesDeprecatedResp{}, nil
+	case k == "ALL_BLOCK_SERVICES":
+		return &AllBlockServicesReq{}, &AllBlockServicesResp{}, nil
 	case k == "MOVE_CDC_LEADER":
 		return &MoveCdcLeaderReq{}, &MoveCdcLeaderResp{}, nil
 	case k == "CLEAR_CDC_INFO":
@@ -6487,6 +6493,49 @@ func (v *AllBlockServicesDeprecatedResp) Pack(w io.Writer) error {
 }
 
 func (v *AllBlockServicesDeprecatedResp) Unpack(r io.Reader) error {
+	var len1 int
+	if err := bincode.UnpackLength(r, &len1); err != nil {
+		return err
+	}
+	bincode.EnsureLength(&v.BlockServices, len1)
+	for i := 0; i < len1; i++ {
+		if err := v.BlockServices[i].Unpack(r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (v *AllBlockServicesReq) RegistryRequestKind() RegistryMessageKind {
+	return ALL_BLOCK_SERVICES
+}
+
+func (v *AllBlockServicesReq) Pack(w io.Writer) error {
+	return nil
+}
+
+func (v *AllBlockServicesReq) Unpack(r io.Reader) error {
+	return nil
+}
+
+func (v *AllBlockServicesResp) RegistryResponseKind() RegistryMessageKind {
+	return ALL_BLOCK_SERVICES
+}
+
+func (v *AllBlockServicesResp) Pack(w io.Writer) error {
+	len1 := len(v.BlockServices)
+	if err := bincode.PackLength(w, len1); err != nil {
+		return err
+	}
+	for i := 0; i < len1; i++ {
+		if err := v.BlockServices[i].Pack(w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (v *AllBlockServicesResp) Unpack(r io.Reader) error {
 	var len1 int
 	if err := bincode.UnpackLength(r, &len1); err != nil {
 		return err

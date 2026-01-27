@@ -2012,6 +2012,11 @@ func main() {
 			reflect.TypeOf(msgs.AllBlockServicesDeprecatedResp{}),
 		},
 		{
+			0x28,
+			reflect.TypeOf(msgs.AllBlockServicesReq{}),
+			reflect.TypeOf(msgs.AllBlockServicesResp{}),
+		},
+		{
 			0x23,
 			reflect.TypeOf(msgs.MoveCdcLeaderReq{}),
 			reflect.TypeOf(msgs.MoveCdcLeaderResp{}),

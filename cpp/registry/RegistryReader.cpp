@@ -135,6 +135,11 @@ void RegistryReader::step() {
             registryResp.blockServices.els = _allBlockServices();
             break;
         }
+        case RegistryMessageKind::ALL_BLOCK_SERVICES: {
+            auto &registryResp = resp.resp.setAllBlockServices();
+            registryResp.blockServices.els = _allBlockServicesFull();
+            break;
+        }
         case RegistryMessageKind::BLOCK_SERVICES_NEEDING_MIGRATION: {
             auto &registryResp = resp.resp.setBlockServicesNeedingMigration();
             auto &migrationReq = req.req.getBlockServicesNeedingMigration();
@@ -276,6 +281,11 @@ InfoResp RegistryReader::_info() {
 std::vector<BlockServiceDeprecatedInfo> RegistryReader::_allBlockServices() {
     _populateBlockServiceCache();
     return _cachedAllBlockServices;
+}
+
+std::vector<FullBlockServiceInfo> RegistryReader::_allBlockServicesFull() {
+    _populateBlockServiceCache();
+    return _cachedBlockServices;
 }
 
 std::vector<BlockServiceId> RegistryReader::_blockServicesNeedingMigration(LocationId location) {

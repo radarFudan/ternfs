@@ -2110,6 +2110,12 @@ type AllBlockServicesDeprecatedResp struct {
 	BlockServices []BlockServiceDeprecatedInfo
 }
 
+type AllBlockServicesReq struct{}
+
+type AllBlockServicesResp struct {
+	BlockServices []FullBlockServiceInfo
+}
+
 type BlockServicesNeedingMigrationReq struct {
 	LocationId Location
 }

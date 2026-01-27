@@ -2180,7 +2180,7 @@ private:
     std::string _registryHost;
     uint16_t _registryPort;
     XmonNCAlert _alert;
-    std::vector<BlockServiceDeprecatedInfo> _blockServices;
+    std::vector<FullBlockServiceInfo> _blockServices;
     std::vector<BlockServiceInfoShort> _currentBlockServices;
     bool _updatedOnce;
 public:

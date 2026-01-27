@@ -126,7 +126,7 @@ static std::pair<int, std::string> readRegistryResponse(int fd, RegistryRespCont
     return {};
 }
 
-std::pair<int, std::string> fetchBlockServices(const std::string& addr, uint16_t port, Duration timeout, ShardId shid, std::vector<BlockServiceDeprecatedInfo>& blockServices, std::vector<BlockServiceInfoShort>& currentBlockServices) {
+std::pair<int, std::string> fetchBlockServices(const std::string& addr, uint16_t port, Duration timeout, ShardId shid, std::vector<FullBlockServiceInfo>& blockServices, std::vector<BlockServiceInfoShort>& currentBlockServices) {
     blockServices.clear();
     currentBlockServices.clear();
 
@@ -140,7 +140,7 @@ std::pair<int, std::string> fetchBlockServices(const std::string& addr, uint16_t
     // all block services
     {
         RegistryReqContainer reqContainer;
-        auto& req = reqContainer.setAllBlockServicesDeprecated();
+        auto& req = reqContainer.setAllBlockServices();
         {
             const auto [err, errStr] = writeRegistryRequest(sock.get(), reqContainer, timeout);
             if (err) { FAIL(err, errStr); }
@@ -152,7 +152,7 @@ std::pair<int, std::string> fetchBlockServices(const std::string& addr, uint16_t
             if (err) { FAIL(err, errStr); }
         }
 
-        blockServices = respContainer.getAllBlockServicesDeprecated().blockServices.els;
+        blockServices = respContainer.getAllBlockServices().blockServices.els;
     }
 
     // current block services
@@ -180,7 +180,7 @@ std::pair<int, std::string> fetchBlockServices(const std::string& addr, uint16_t
     // registry should guarantee that when sending response but verify the invariant
     {
         std::unordered_set<uint64_t> knownBlockServices;
-        std::unordered_map<uint64_t, const BlockServiceDeprecatedInfo* > bsIdToBlockService;
+        std::unordered_map<uint64_t, const FullBlockServiceInfo* > bsIdToBlockService;
         std::unordered_set<std::string> fdSet;
         for (const auto& bs : blockServices) {
             knownBlockServices.insert(bs.id.u64);
