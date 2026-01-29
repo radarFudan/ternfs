@@ -87,7 +87,7 @@ void BlockServiceFileTracker::_scanBlockServices() {
         auto bsInfo = _pendingBlockServices.back();
         _pendingBlockServices.pop_back();
         _blockServiceState.emplace(bsInfo.id, BlockServiceStatus{
-            .hadFiles = false,
+            .hadFiles = bsInfo.hasFiles,
             .endShardId = _currentShardIndex == 0 ? ShardId{255} : ShardId{static_cast<uint8_t>(_currentShardIndex.u8 - 1)},
         });
         _inflightRequests.emplace(++_nextRequestId, ShardRequestStatus{
