@@ -34,6 +34,15 @@ We also want to be able to restore deleted files or directories, using a configu
 
 Finally, we want to have the option to replicate TernFS to multiple regions, to be able to scale up compute across multiple data centres, and to remove any single data centre as a point of failure.
 
+## Versioning and releases
+
+TernFS is actively used in production, but the project is still evolving quickly. All releases are currently in the `0.X.Y` range and should be considered pre-1.0, with the following meaning:
+
+- A change in **X** (e.g. `0.4.5` → `0.5.0`) may remove or change internal APIs. Upgrading across minor versions should not be skipped; read the changelog.
+- A change in **Y** (e.g. `0.5.3` → `0.5.4`) adds new functionality or small configuration changes, and may contain bug fixes.
+
+
+
 ## Components
 
 ```                                   
@@ -236,13 +245,13 @@ Most of the codebase is understandable by VS Code/LSP:
     - Disable existing C++ integrations for VS Code (I don't remember which exact C++ extension caused me trouble -- something by Microsoft itself).
     - Install the [clangd extension](https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-clangd).
     - Generate `compile_commands.json` with
-        
+
         ```
         % cd cpp
         % ./build.py debug
         % cp ./build/debug/compile_commands.json .
         ```
-        
+
         If you change the build process (i.e. if you change CMake files) you'll need to generate and copy `compile_commands.json` again.
 * Code in `kmod/`:
     - [Build the module](#building-the-kernel-module).
