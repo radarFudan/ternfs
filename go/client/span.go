@@ -821,6 +821,7 @@ func (f *FileReader) readMirrored(log *log.Logger, client *Client, bufPool *bufp
 	fileEnd := ((offset + uint64(len(p)) + uint64(msgs.TERN_PAGE_SIZE) - 1) / uint64(msgs.TERN_PAGE_SIZE)) * uint64(msgs.TERN_PAGE_SIZE)
 	blockStart := uint32(fileStart - span.Span.Header.ByteOffset)
 	blockEnd := uint32(fileEnd - span.Span.Header.ByteOffset)
+	blockCount := blockEnd - blockStart
 	var err error
 	for i := range body.Blocks {
 		block := &body.Blocks[i]
@@ -829,9 +830,9 @@ func (f *FileReader) readMirrored(log *log.Logger, client *Client, bufPool *bufp
 			continue
 		}
 		var br BlockReader
-		br.New(bufPool, blockStart, blockEnd, nil)
+		br.New(bufPool, blockStart, blockCount, nil)
 		// TODO check CRC for entire stripes
-		err = client.FetchBlock(log, nil, &span.BlockServices[block.BlockServiceIx], block.BlockId, blockStart, blockEnd, &br)
+		err = client.FetchBlock(log, nil, &span.BlockServices[block.BlockServiceIx], block.BlockId, blockStart, blockCount, &br)
 		if err == nil {
 			buf := br.AcquireBuf()
 			n := copy(p, buf.Bytes()[offset-fileStart:])
