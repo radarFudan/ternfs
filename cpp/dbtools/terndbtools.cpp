@@ -5,12 +5,172 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
+#include <rocksdb/db.h>
+#include <rocksdb/options.h>
+#include <rocksdb/iterator.h>
+#include <rocksdb/write_batch.h>
+
+#include "BlockServicesCacheDB.hpp"
+#include "CDCDB.hpp"
+#include "CDCDBTools.hpp"
+#include "Env.hpp"
+#include "LogsDB.hpp"
+#include "RegistryDB.hpp"
 #include "ShardDB.hpp"
 #include "ShardDBTools.hpp"
-#include "CDCDBTools.hpp"
 
 #define die(...) do { fprintf(stderr, __VA_ARGS__); exit(1); } while(false)
+
+static void copyDB(const std::string& srcPath, const std::string& dstPath) {
+    Logger logger(LogLevel::LOG_INFO, STDERR_FILENO, false, false);
+    std::shared_ptr<XmonAgent> xmon;
+    Env env(logger, xmon, "copyDB");
+
+    rocksdb::Options listOptions;
+    std::vector<std::string> cfNames;
+    auto s = rocksdb::DB::ListColumnFamilies(listOptions, srcPath, &cfNames);
+    if (!s.ok()) {
+        die("Failed to list column families in %s: %s\n", srcPath.c_str(), s.ToString().c_str());
+    }
+
+    LOG_INFO(env, "Found %s column families in %s", cfNames.size(), srcPath);
+    for (const auto& name : cfNames) {
+        LOG_INFO(env, "  %s", name);
+    }
+
+    std::unordered_map<std::string, rocksdb::ColumnFamilyOptions> knownCFOptions;
+    auto addKnown = [&](const std::vector<rocksdb::ColumnFamilyDescriptor>& descriptors) {
+        for (const auto& d : descriptors) {
+            knownCFOptions[d.name] = d.options;
+        }
+    };
+    addKnown(ShardDB::getColumnFamilyDescriptors());
+    addKnown(LogsDB::getColumnFamilyDescriptors());
+    addKnown(CDCDB::getColumnFamilyDescriptors());
+    addKnown(BlockServicesCacheDB::getColumnFamilyDescriptors());
+    addKnown(RegistryDB::getColumnFamilyDescriptors());
+
+    std::vector<rocksdb::ColumnFamilyDescriptor> cfDescriptors;
+    for (const auto& name : cfNames) {
+        auto it = knownCFOptions.find(name);
+        if (it != knownCFOptions.end()) {
+            cfDescriptors.emplace_back(name, it->second);
+        } else {
+            LOG_INFO(env, "  Warning: CF '%s' not in known descriptors, using default options", name);
+            cfDescriptors.emplace_back(name, rocksdb::ColumnFamilyOptions());
+        }
+    }
+
+    rocksdb::Options srcOptions;
+    srcOptions.compression = rocksdb::kLZ4Compression;
+    srcOptions.bottommost_compression = rocksdb::kZSTD;
+    srcOptions.create_if_missing = false;
+    srcOptions.create_missing_column_families = false;
+    srcOptions.max_open_files = 1000;
+
+    rocksdb::DB* srcDB = nullptr;
+    std::vector<rocksdb::ColumnFamilyHandle*> srcHandles;
+    s = rocksdb::DB::OpenForReadOnly(srcOptions, srcPath, cfDescriptors, &srcHandles, &srcDB);
+    if (!s.ok()) {
+        die("Failed to open source DB %s: %s\n", srcPath.c_str(), s.ToString().c_str());
+    }
+
+    rocksdb::Options dstOptions;
+    dstOptions.compression = rocksdb::kLZ4Compression;
+    dstOptions.bottommost_compression = rocksdb::kZSTD;
+    dstOptions.create_if_missing = true;
+    dstOptions.create_missing_column_families = true;
+    dstOptions.max_open_files = 1000;
+
+    rocksdb::DB* dstDB = nullptr;
+    std::vector<rocksdb::ColumnFamilyHandle*> dstHandles;
+    s = rocksdb::DB::Open(dstOptions, dstPath, cfDescriptors, &dstHandles, &dstDB);
+    if (!s.ok()) {
+        die("Failed to open destination DB %s: %s\n", dstPath.c_str(), s.ToString().c_str());
+    }
+
+    static constexpr size_t BATCH_SIZE = 1024;
+
+    for (size_t i = 0; i < cfNames.size(); i++) {
+        bool hasMergeOperator = cfDescriptors[i].options.merge_operator != nullptr;
+
+        uint64_t estimatedKeys = 0;
+        srcDB->GetIntProperty(srcHandles[i], "rocksdb.estimate-num-keys", &estimatedKeys);
+        uint64_t nextProgressThreshold = estimatedKeys > 0 ? estimatedKeys / 10 : 0;
+        unsigned progressPct = 0;
+
+        LOG_INFO(env, "Copying column family '%s'%s (estimated %s keys)...",
+                 cfNames[i], hasMergeOperator ? " (has merge operator, dropping zero values)" : "", estimatedKeys);
+
+        size_t keysCopied = 0;
+        size_t keysDropped = 0;
+        size_t totalKeyBytes = 0;
+        size_t totalValueBytes = 0;
+
+        auto* it = srcDB->NewIterator(rocksdb::ReadOptions(), srcHandles[i]);
+        rocksdb::WriteBatch batch;
+
+        for (it->SeekToFirst(); it->Valid(); it->Next()) {
+            // For CFs with merge operators, the iterator resolves all merge
+            // operands. If the final value is all-zero (e.g. +1/-1 that
+            // cancelled out), skip it — it's dead weight.
+            if (hasMergeOperator) {
+                auto val = it->value();
+                bool allZero = true;
+                for (size_t b = 0; b < val.size(); b++) {
+                    if (val.data()[b] != 0) { allZero = false; break; }
+                }
+                if (allZero) {
+                    keysDropped++;
+                    continue;
+                }
+            }
+
+            batch.Put(dstHandles[i], it->key(), it->value());
+            keysCopied++;
+            totalKeyBytes += it->key().size();
+            totalValueBytes += it->value().size();
+
+            if (keysCopied % BATCH_SIZE == 0) {
+                s = dstDB->Write(rocksdb::WriteOptions(), &batch);
+                if (!s.ok()) {
+                    die("Failed to write batch to CF '%s': %s\n", cfNames[i].c_str(), s.ToString().c_str());
+                }
+                batch.Clear();
+            }
+
+            if (nextProgressThreshold > 0 && (keysCopied + keysDropped) >= nextProgressThreshold) {
+                progressPct += 10;
+                LOG_INFO(env, "  %s%% (%s keys copied, %s dropped)", progressPct, keysCopied, keysDropped);
+                uint64_t pctThreshold = estimatedKeys > 0 ? (uint64_t)(estimatedKeys * (progressPct + 10) / 100) : 0;
+                nextProgressThreshold = std::max<uint64_t>(pctThreshold, keysCopied + keysDropped + 100000000ull);
+            }
+        }
+        if (!it->status().ok()) {
+            die("Iterator error on CF '%s': %s\n", cfNames[i].c_str(), it->status().ToString().c_str());
+        }
+
+        if (batch.Count() > 0) {
+            s = dstDB->Write(rocksdb::WriteOptions(), &batch);
+            if (!s.ok()) {
+                die("Failed to write final batch to CF '%s': %s\n", cfNames[i].c_str(), s.ToString().c_str());
+            }
+        }
+
+        delete it;
+        LOG_INFO(env, "  Done: %s keys copied, %s keys dropped, %s key bytes, %s value bytes",
+                 keysCopied, keysDropped, totalKeyBytes, totalValueBytes);
+    }
+
+    for (auto* h : srcHandles) srcDB->DestroyColumnFamilyHandle(h);
+    for (auto* h : dstHandles) dstDB->DestroyColumnFamilyHandle(h);
+    delete srcDB;
+    delete dstDB;
+
+    LOG_INFO(env, "Copy complete: %s -> %s", srcPath, dstPath);
+}
 
 static void usage(const char* binary) {
     fprintf(stderr, "Usage: %s COMMAND ARGS\n\n", binary);
@@ -31,6 +191,10 @@ static void usage(const char* binary) {
     fprintf(stderr, "       Outputs files with spans that have duplicate failure domain, along with how many failure domain failures they can tolerate.\n");
     fprintf(stderr, "  block-service-usage DB_PATH OUTPUT_FILE_PATH\n");
     fprintf(stderr, "       Aggregates expected block usage per block service\n");
+    fprintf(stderr, "  copy-db OLD_DB_PATH NEW_DB_PATH\n");
+    fprintf(stderr, "       Copies all column families from OLD_DB_PATH to NEW_DB_PATH by iterating all keys.\n");
+    fprintf(stderr, "  rebuild-block-services-to-files DB_PATH\n");
+    fprintf(stderr, "       Drops and recreates the blockServicesToFiles CF by scanning all spans.\n");
 }
 
 int main(int argc, char** argv) {
@@ -85,6 +249,13 @@ int main(int argc, char** argv) {
             std::string dbPath = getNextArg();
             std::string outputFilePath = getNextArg();
             ShardDBTools::outputBlockServiceUsage(dbPath, outputFilePath);
+        } else if (arg == "copy-db") {
+            std::string oldPath = getNextArg();
+            std::string newPath = getNextArg();
+            copyDB(oldPath, newPath);
+        } else if (arg == "rebuild-block-services-to-files") {
+            std::string dbPath = getNextArg();
+            ShardDBTools::rebuildBlockServicesToFiles(dbPath);
         } else {
             dieWithUsage();
         }

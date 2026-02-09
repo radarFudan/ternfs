@@ -827,3 +827,94 @@ void ShardDBTools::outputBlockServiceUsage(const std::string& dbPath, const std:
     outputStream.close();
     ALWAYS_ASSERT(!outputStream.bad(), "An error occurred while closing the sample output file");
 }
+
+void ShardDBTools::rebuildBlockServicesToFiles(const std::string& dbPath) {
+    Logger logger(LogLevel::LOG_INFO, STDERR_FILENO, false, false);
+    std::shared_ptr<XmonAgent> xmon;
+    Env env(logger, xmon, "ShardDBTools");
+    SharedRocksDB sharedDb(logger, xmon, dbPath, "");
+    sharedDb.registerCFDescriptors(ShardDB::getColumnFamilyDescriptors());
+    sharedDb.registerCFDescriptors(LogsDB::getColumnFamilyDescriptors());
+    sharedDb.registerCFDescriptors(BlockServicesCacheDB::getColumnFamilyDescriptors());
+    rocksdb::Options rocksDBOptions;
+    rocksDBOptions.compression = rocksdb::kLZ4Compression;
+    rocksDBOptions.bottommost_compression = rocksdb::kZSTD;
+    rocksDBOptions.max_open_files = 1000;
+    sharedDb.open(rocksDBOptions);
+    auto db = sharedDb.db();
+
+    LOG_INFO(env, "Dropping blockServicesToFiles column family...");
+    sharedDb.deleteCF("blockServicesToFiles");
+
+    LOG_INFO(env, "Recreating blockServicesToFiles column family...");
+    rocksdb::ColumnFamilyOptions cfOptions;
+    cfOptions.merge_operator = CreateInt64AddOperator();
+    auto newCf = sharedDb.createCF({"blockServicesToFiles", cfOptions});
+
+    LOG_INFO(env, "Scanning all spans to rebuild blockServicesToFiles...");
+
+    std::unordered_map<BlockServiceId, int64_t> fileBlockServices;
+    rocksdb::WriteBatch batch;
+    uint64_t totalEntries = 0;
+    uint64_t analyzedSpans = 0;
+    uint64_t analyzedFiles = 0;
+    InodeId thisFile = NULL_INODE_ID;
+
+    const auto flushFile = [&]() {
+        if (thisFile == NULL_INODE_ID || fileBlockServices.empty()) return;
+        for (const auto& [blockServiceId, count] : fileBlockServices) {
+            StaticValue<BlockServiceToFileKey> k;
+            k().setBlockServiceId(blockServiceId);
+            k().setFileId(thisFile);
+            StaticValue<I64Value> v;
+            v().setI64(count);
+            batch.Put(newCf, k.toSlice(), v.toSlice());
+            totalEntries++;
+        }
+        if (batch.Count() >= 1024) {
+            ROCKS_DB_CHECKED(db->Write(rocksdb::WriteOptions(), &batch));
+            batch.Clear();
+        }
+        fileBlockServices.clear();
+    };
+
+    rocksdb::ReadOptions readOptions;
+    std::unique_ptr<rocksdb::Iterator> it(db->NewIterator(readOptions, sharedDb.getCF("spans")));
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+        analyzedSpans++;
+        auto spanK = ExternalValue<SpanKey>::FromSlice(it->key());
+        if (spanK().fileId() != thisFile) {
+            flushFile();
+            analyzedFiles++;
+            thisFile = spanK().fileId();
+        }
+        auto spanV = ExternalValue<SpanBody>::FromSlice(it->value());
+        if (spanV().isInlineStorage()) {
+            continue;
+        }
+        for (uint8_t i = 0; i < spanV().locationCount(); ++i) {
+            auto blocksBody = spanV().blocksBodyReadOnly(i);
+            if (blocksBody.storageClass() == EMPTY_STORAGE) {
+                continue;
+            }
+            for (int j = 0; j < blocksBody.parity().blocks(); j++) {
+                auto block = blocksBody.block(j);
+                fileBlockServices[block.blockService()] += 1;
+            }
+        }
+
+        if (analyzedSpans % 10000000 == 0) {
+            LOG_INFO(env, "  scanned %s spans in %s files, %s entries written so far...",
+                     analyzedSpans, analyzedFiles, totalEntries);
+        }
+    }
+    ROCKS_DB_CHECKED(it->status());
+
+    flushFile();
+    if (batch.Count() > 0) {
+        ROCKS_DB_CHECKED(db->Write(rocksdb::WriteOptions(), &batch));
+    }
+
+    LOG_INFO(env, "Rebuild complete: %s spans in %s files, wrote %s blockServicesToFiles entries",
+             analyzedSpans, analyzedFiles, totalEntries);
+}
