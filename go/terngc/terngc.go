@@ -100,6 +100,8 @@ func main() {
 	destructFiles := flag.Bool("destruct-files", false, "")
 	destructFilesWorkersPerShard := flag.Int("destruct-files-workers-per-shard", 10, "")
 	destructFilesWorkersQueueSize := flag.Int("destruct-files-workers-queue-size", 50, "")
+	collectDirectoriesMinCycleInterval := flag.Duration("collect-directories-min-cycle-interval", 15*time.Minute, "Minimum interval between collect-directories cycles per shard")
+	destructFilesMinCycleInterval := flag.Duration("destruct-files-min-cycle-interval", 15*time.Minute, "Minimum interval between destruct-files cycles per shard")
 	defrag := flag.Bool("defrag", false, "")
 	defragWorkersPerShard := flag.Int("defrag-workers-per-shard", 5, "")
 	defragMinSpanSize := flag.Uint("defrag-min-span-size", 0, "")
@@ -332,8 +334,12 @@ func main() {
 			go func() {
 				defer func() { lrecover.HandleRecoverChan(l, terminateChan, recover()) }()
 				for {
+					cycleStart := time.Now()
 					if err := cleanup.CollectDirectories(l, c, dirInfoCache, nil, opts, collectDirectoriesState, shid, *collectDirectoriesMinEdgeAge); err != nil {
 						panic(fmt.Errorf("could not collect directories in shard %v: %v", shid, err))
+					}
+					if elapsed := time.Since(cycleStart); elapsed < *collectDirectoriesMinCycleInterval {
+						time.Sleep(*collectDirectoriesMinCycleInterval - elapsed)
 					}
 				}
 			}()
@@ -352,18 +358,20 @@ func main() {
 				defer l.ClearNC(alert)
 				timesFailed := 0
 				for {
+					cycleStart := time.Now()
 					if err := cleanup.DestructFiles(l, c, opts, destructFilesState, shid); err != nil {
 						timesFailed++
 						if timesFailed == 5 {
 							l.RaiseNC(alert, "could not destruct files after 5 attempts. last error: %v", err)
 						}
-						l.Info("destructing files in shard %v failed, sleeping for 10 minutes", shid)
-						time.Sleep(10 * time.Minute)
+						l.Info("destructing files in shard %v failed", shid)
 					} else {
 						l.ClearNC(alert)
 						timesFailed = 0
-						l.Info("finished destructing in shard %v, sleeping for one hour", shid)
-						time.Sleep(time.Hour)
+						l.Info("finished destructing in shard %v", shid)
+					}
+					if elapsed := time.Since(cycleStart); elapsed < *destructFilesMinCycleInterval {
+						time.Sleep(*destructFilesMinCycleInterval - elapsed)
 					}
 				}
 			}()
