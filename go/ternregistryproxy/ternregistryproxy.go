@@ -218,7 +218,7 @@ func writeRegistryResponseError(log *log.Logger, w io.Writer, err msgs.TernError
 	if err := binary.Write(buf, binary.LittleEndian, msgs.REGISTRY_RESP_PROTOCOL_VERSION); err != nil {
 		return err
 	}
-	if err := binary.Write(w, binary.LittleEndian, uint32(1+2)); err != nil {
+	if err := binary.Write(buf, binary.LittleEndian, uint32(1+2)); err != nil {
 		return err
 	}
 	if _, err := buf.Write([]byte{msgs.ERROR}); err != nil {
