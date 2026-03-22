@@ -350,9 +350,7 @@ func handleRequest(log *log.Logger, s *state, conn *net.TCPConn) {
 	defer conn.Close()
 
 	for {
-		now := time.Now()
-		reqDeadline := now.Add(client.DefaultRegistryTimeout.RequestTimeout)
-		conn.SetReadDeadline(now.Add(5 * time.Minute))
+		conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 		req, err := readRegistryRequest(log, conn)
 		conn.SetReadDeadline(time.Time{})
 
@@ -363,6 +361,8 @@ func handleRequest(log *log.Logger, s *state, conn *net.TCPConn) {
 				continue
 			}
 		}
+
+		reqDeadline := time.Now().Add(client.DefaultRegistryTimeout.RequestTimeout)
 		log.Debug("handling request %T from %s", req, conn.RemoteAddr())
 		resp, err := handleRequestParsed(log, s, req)
 		if err != nil {
