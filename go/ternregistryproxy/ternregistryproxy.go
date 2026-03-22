@@ -335,6 +335,8 @@ func readRegistryRequest(
 		req = &msgs.ShardBlockServicesReq{}
 	case msgs.BLOCK_SERVICES_NEEDING_MIGRATION:
 		req = &msgs.BlockServicesNeedingMigrationReq{}
+	case msgs.ALL_BLOCK_SERVICES:
+		req = &msgs.AllBlockServicesReq{}
 	default:
 		return nil, fmt.Errorf("bad registry request kind %v", kind)
 	}
