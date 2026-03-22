@@ -59,11 +59,8 @@ func readRegistryResponse(
 		return nil, err
 	}
 	if data[0] == msgs.ERROR {
-		var err uint16
-		if err := binary.Read(r, binary.LittleEndian, &err); err != nil {
-			return nil, fmt.Errorf("could not read error: %w", err)
-		}
-		return nil, msgs.TernError(err)
+		errCode := binary.LittleEndian.Uint16(data[1:3])
+		return nil, msgs.TernError(errCode)
 	}
 	kind := msgs.RegistryMessageKind(data[0])
 	var resp msgs.RegistryResponse
