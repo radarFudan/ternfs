@@ -352,7 +352,7 @@ func handleRequest(log *log.Logger, s *state, conn *net.TCPConn) {
 	for {
 		now := time.Now()
 		reqDeadline := now.Add(client.DefaultRegistryTimeout.RequestTimeout)
-		conn.SetReadDeadline(now.Add(client.DefaultRegistryTimeout.ReconnectTimeout.Overall))
+		conn.SetReadDeadline(now.Add(5 * time.Minute))
 		req, err := readRegistryRequest(log, conn)
 		conn.SetReadDeadline(time.Time{})
 
