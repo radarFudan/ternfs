@@ -28,6 +28,7 @@ public:
     static constexpr uint32_t MAX_BLOCK_SERVICE_SCAN = 128;
     static constexpr uint32_t MAX_SHARD_RESPONSES = 2*MAX_BLOCK_SERVICE_SCAN;
     static constexpr Duration SHARD_RETRY_TIMEOUT = 1_sec;
+    static constexpr Duration MIN_SCAN_CYCLE_INTERVAL = 15_mins;
 
     BlockServiceFileTracker(Logger& logger, std::shared_ptr<XmonAgent>& xmon, const RegistryOptions& options, RegistryDB& db, RegistryServer& server, RegistryWriter& writer);
 
@@ -51,6 +52,7 @@ private:
     std::unordered_map<BlockServiceId, BlockServiceStatus> _blockServiceState;
     std::vector<FullBlockServiceInfo> _pendingBlockServices;
     ShardId _currentShardIndex = 0;
+    TernTime _lastScanCycleComplete = 0;
 
     void _processResponses();
     void _scanBlockServices();

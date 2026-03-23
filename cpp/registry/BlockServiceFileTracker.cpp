@@ -76,6 +76,11 @@ void BlockServiceFileTracker::_processResponses() {
 
 void BlockServiceFileTracker::_scanBlockServices() {
     if (_blockServiceState.empty() && _pendingBlockServices.empty()) {
+        auto now = ternNow();
+        if (now - _lastScanCycleComplete < MIN_SCAN_CYCLE_INTERVAL) {
+            return;
+        }
+        _lastScanCycleComplete = now;
         LOG_INFO(_env, "Scanning for block services to track");
         _registryDB.blockServices(_pendingBlockServices);
     }
