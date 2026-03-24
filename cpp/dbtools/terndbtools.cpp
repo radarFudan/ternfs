@@ -76,7 +76,7 @@ static void createCheckpoint(const std::string& dbPath, const std::string& check
         std::vector<rocksdb::ColumnFamilyHandle*> handles;
         s = rocksdb::DB::OpenForReadOnly(dbOptions, dbPath, cfDescriptors, &handles, &db);
         if (!s.ok()) {
-            if (s.IsPathNotFound() && attempt + 1 < maxRetries) {
+            if (attempt + 1 < maxRetries) {
                 LOG_INFO(env, "Open failed (compaction race), retrying (%s/%s): %s",
                          attempt + 1, maxRetries, s.ToString());
                 sleep(1);
@@ -104,7 +104,7 @@ static void createCheckpoint(const std::string& dbPath, const std::string& check
             return;
         }
 
-        if (s.IsPathNotFound() && attempt + 1 < maxRetries) {
+        if (attempt + 1 < maxRetries) {
             LOG_INFO(env, "Checkpoint failed (compaction race), retrying (%s/%s): %s",
                      attempt + 1, maxRetries, s.ToString());
             std::error_code ec;
