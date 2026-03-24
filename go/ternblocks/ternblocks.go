@@ -283,6 +283,8 @@ func registerPeriodically(
 ) {
 	req := msgs.RegisterBlockServicesReq{}
 	alert := log.NewNCAlert(10 * time.Second)
+	failureBackoff := 100 * time.Millisecond
+	const maxFailureBackoff = 60 * time.Second
 	for {
 		req.BlockServices = req.BlockServices[:0]
 		for _, bs := range blockServices {
@@ -295,10 +297,12 @@ func registerPeriodically(
 		_, err := env.registryConn.Request(&req)
 		if err != nil {
 			log.RaiseNC(alert, "could not register block services with %+v: %v", env.registryConn.RegistryAddress(), err)
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(failureBackoff)
+			failureBackoff = min(failureBackoff*2, maxFailureBackoff)
 			continue
 		}
 		log.ClearNC(alert)
+		failureBackoff = 100 * time.Millisecond
 		waitFor := minimumRegisterInterval + time.Duration(mrand.Uint64()%uint64(variantRegisterInterval.Nanoseconds()))
 		log.Info("registered with %v (%v alive), waiting %v", env.registryConn.RegistryAddress(), len(blockServices), waitFor)
 		time.Sleep(waitFor)
