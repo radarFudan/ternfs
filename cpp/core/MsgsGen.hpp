@@ -107,6 +107,7 @@ enum class TernError : uint16_t {
     SWAP_BLOCKS_MISMATCHING_LOCATION = 101,
     LOCATION_EXISTS = 102,
     LOCATION_NOT_FOUND = 103,
+    AUTO_DECOMMISSION_RATE_LIMITED = 104,
 };
 
 std::ostream& operator<<(std::ostream& out, TernError err);
@@ -206,9 +207,10 @@ const std::vector<TernError> allTernErrors {
     TernError::SWAP_BLOCKS_MISMATCHING_LOCATION,
     TernError::LOCATION_EXISTS,
     TernError::LOCATION_NOT_FOUND,
+    TernError::AUTO_DECOMMISSION_RATE_LIMITED,
 };
 
-constexpr int maxTernError = 104;
+constexpr int maxTernError = 105;
 
 enum class ShardMessageKind : uint8_t {
     ERROR = 0,

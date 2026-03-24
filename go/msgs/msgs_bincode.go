@@ -256,6 +256,7 @@ const (
 	SWAP_BLOCKS_MISMATCHING_LOCATION        TernError = 101
 	LOCATION_EXISTS                         TernError = 102
 	LOCATION_NOT_FOUND                      TernError = 103
+	AUTO_DECOMMISSION_RATE_LIMITED          TernError = 104
 )
 
 func (err TernError) String() string {
@@ -448,6 +449,8 @@ func (err TernError) String() string {
 		return "LOCATION_EXISTS"
 	case 103:
 		return "LOCATION_NOT_FOUND"
+	case 104:
+		return "AUTO_DECOMMISSION_RATE_LIMITED"
 	default:
 		return fmt.Sprintf("TernError(%d)", err)
 	}

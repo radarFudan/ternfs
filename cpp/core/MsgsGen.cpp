@@ -293,6 +293,9 @@ std::ostream& operator<<(std::ostream& out, TernError err) {
     case TernError::LOCATION_NOT_FOUND:
         out << "LOCATION_NOT_FOUND";
         break;
+    case TernError::AUTO_DECOMMISSION_RATE_LIMITED:
+        out << "AUTO_DECOMMISSION_RATE_LIMITED";
+        break;
     default:
         out << "TernError(" << ((int)err) << ")";
         break;

@@ -235,7 +235,7 @@ public:
                     if (now - lastIt->second < _options.minDecomInterval) {
                         auto& resp = _registryResponses.emplace_back();
                         resp.requestId = req.requestId;
-                        resp.resp.setError() = TernError::AUTO_DECOMMISSION_FORBIDDEN;
+                        resp.resp.setError() = TernError::AUTO_DECOMMISSION_RATE_LIMITED;
                         break;
                     }
                 }

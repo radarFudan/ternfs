@@ -1216,6 +1216,9 @@ func getDiskStats(log *log.Logger, statsPath string) (map[string]diskStats, erro
 func raiseAlerts(log *log.Logger, env *env, blockServices map[msgs.BlockServiceId]*blockService) {
 	for {
 		for bsId, bs := range blockServices {
+			if bs.decommissioned {
+				continue
+			}
 			ioErrors := bs.lastIoErrors
 			requests := bs.lastRequests
 			bs.lastIoErrors = atomic.LoadUint64(&bs.ioErrors)
@@ -1223,9 +1226,15 @@ func raiseAlerts(log *log.Logger, env *env, blockServices map[msgs.BlockServiceI
 			ioErrors = bs.lastIoErrors - ioErrors
 			requests = bs.lastRequests - requests
 			if requests*uint64(env.ioAlertPercent) < ioErrors*100 {
-				log.RaiseNC(&bs.ioErrorsAlert, "block service %v had %v ioErrors from %v requests in the last 5 minutes which is over the %d%% threshold", bsId, ioErrors, requests, env.ioAlertPercent)
-				log.Info("decommissioning block service %v", bs.cachedInfo.Id)
-				env.registryConn.Request(&msgs.DecommissionBlockServiceReq{Id: bs.cachedInfo.Id})
+				log.Info("block service %v had %v ioErrors from %v requests in the last 5 minutes (over %d%% threshold), requesting decommission", bsId, ioErrors, requests, env.ioAlertPercent)
+				_, err := env.registryConn.Request(&msgs.DecommissionBlockServiceReq{Id: bs.cachedInfo.Id})
+				if err != nil {
+					log.RaiseNC(&bs.ioErrorsAlert, "block service %v had %v ioErrors from %v requests in the last 5 minutes (over %d%% threshold), decommission failed: %v", bsId, ioErrors, requests, env.ioAlertPercent, err)
+				} else {
+					bs.decommissioned = true
+					log.ClearNC(&bs.ioErrorsAlert)
+					log.Info("block service %v decommissioned successfully", bs.cachedInfo.Id)
+				}
 			} else {
 				log.ClearNC(&bs.ioErrorsAlert)
 			}
@@ -1336,6 +1345,7 @@ type blockService struct {
 	requests                        uint64
 	lastIoErrors                    uint64
 	lastRequests                    uint64
+	decommissioned                  bool
 }
 
 func getMountsInfo(log *log.Logger, mountsPath string) (map[string]string, error) {
@@ -1578,7 +1588,7 @@ func main() {
 		}
 		key, err := retrieveOrCreateKey(l, dir)
 		if err != nil {
-			l.RaiseAlert("%v", err)
+			l.Info("%v", err)
 			failedBlockServiceCount++
 			continue
 		}

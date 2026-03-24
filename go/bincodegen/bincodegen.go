@@ -1618,6 +1618,7 @@ func main() {
 		"SWAP_BLOCKS_MISMATCHING_LOCATION",
 		"LOCATION_EXISTS",
 		"LOCATION_NOT_FOUND",
+		"AUTO_DECOMMISSION_RATE_LIMITED",
 	}
 
 	kernelShardReqResps := []reqRespType{
