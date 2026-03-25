@@ -257,6 +257,7 @@ const (
 	LOCATION_EXISTS                         TernError = 102
 	LOCATION_NOT_FOUND                      TernError = 103
 	AUTO_DECOMMISSION_RATE_LIMITED          TernError = 104
+	REGISTRY_OVERLOADED                     TernError = 105
 )
 
 func (err TernError) String() string {
@@ -451,6 +452,8 @@ func (err TernError) String() string {
 		return "LOCATION_NOT_FOUND"
 	case 104:
 		return "AUTO_DECOMMISSION_RATE_LIMITED"
+	case 105:
+		return "REGISTRY_OVERLOADED"
 	default:
 		return fmt.Sprintf("TernError(%d)", err)
 	}

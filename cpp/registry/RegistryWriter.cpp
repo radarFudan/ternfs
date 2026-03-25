@@ -11,7 +11,7 @@
 #include "RegistryServer.hpp"
 #include <unistd.h>
 
-const int REGISTRY_WRITER_QUEUE_SIZE = 4096;
+const int REGISTRY_WRITER_QUEUE_SIZE = 16384;
 const int MAX_WORK_ITEMS_AT_ONCE = 512;
 
 RegistryWriter::RegistryWriter(Logger &logger, std::shared_ptr<XmonAgent> xmon, RegistryDB& registryDB,RegistryServer& server, LogsDB& logsDB) :

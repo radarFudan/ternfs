@@ -108,6 +108,7 @@ enum class TernError : uint16_t {
     LOCATION_EXISTS = 102,
     LOCATION_NOT_FOUND = 103,
     AUTO_DECOMMISSION_RATE_LIMITED = 104,
+    REGISTRY_OVERLOADED = 105,
 };
 
 std::ostream& operator<<(std::ostream& out, TernError err);
@@ -208,9 +209,10 @@ const std::vector<TernError> allTernErrors {
     TernError::LOCATION_EXISTS,
     TernError::LOCATION_NOT_FOUND,
     TernError::AUTO_DECOMMISSION_RATE_LIMITED,
+    TernError::REGISTRY_OVERLOADED,
 };
 
-constexpr int maxTernError = 105;
+constexpr int maxTernError = 106;
 
 enum class ShardMessageKind : uint8_t {
     ERROR = 0,

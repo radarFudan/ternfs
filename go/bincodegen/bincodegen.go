@@ -1619,6 +1619,7 @@ func main() {
 		"LOCATION_EXISTS",
 		"LOCATION_NOT_FOUND",
 		"AUTO_DECOMMISSION_RATE_LIMITED",
+		"REGISTRY_OVERLOADED",
 	}
 
 	kernelShardReqResps := []reqRespType{

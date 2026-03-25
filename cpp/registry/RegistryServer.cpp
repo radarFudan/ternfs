@@ -157,8 +157,11 @@ void RegistryServer::sendRegistryResponses(std::vector<RegistryResponse>& respon
         int fd = inFlightIt->second;
         _inFlightRequests.erase(inFlightIt);
         if (response.resp.kind() == RegistryMessageKind::EMPTY) {
-            // drop connection on empty response
-            LOG_TRACE(_env, "Dropping connection with fd %s due to empty response", fd);
+            // send error response instead of silently dropping
+            LOG_TRACE(_env, "Sending REGISTRY_OVERLOADED to fd %s due to empty response", fd);
+            RegistryRespContainer errorResp;
+            errorResp.setError() = TernError::REGISTRY_OVERLOADED;
+            _sendResponse(fd, errorResp);
             _removeClient(fd);
             continue;
         }

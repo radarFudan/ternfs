@@ -296,6 +296,9 @@ std::ostream& operator<<(std::ostream& out, TernError err) {
     case TernError::AUTO_DECOMMISSION_RATE_LIMITED:
         out << "AUTO_DECOMMISSION_RATE_LIMITED";
         break;
+    case TernError::REGISTRY_OVERLOADED:
+        out << "REGISTRY_OVERLOADED";
+        break;
     default:
         out << "TernError(" << ((int)err) << ")";
         break;

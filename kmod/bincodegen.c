@@ -102,6 +102,7 @@ const char* ternfs_err_str(int err) {
     case 102: return "LOCATION_EXISTS";
     case 103: return "LOCATION_NOT_FOUND";
     case 104: return "AUTO_DECOMMISSION_RATE_LIMITED";
+    case 105: return "REGISTRY_OVERLOADED";
     default: return "UNKNOWN";
     }
 }
