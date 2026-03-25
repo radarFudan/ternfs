@@ -61,9 +61,11 @@ func parallelDirsTest(
 	wg.Add(opts.numThreads)
 	done := uint64(0)
 	inodes := make([]map[string]createInode, opts.numThreads)
+	allCreated := make([]map[string]struct{}, opts.numThreads)
 	for i := 0; i < opts.numThreads; i++ {
 		tid := i
 		inodes[tid] = make(map[string]createInode)
+		allCreated[tid] = make(map[string]struct{})
 		go func() {
 			defer func() { lrecover.HandleRecoverChan(log, terminateChan, recover()) }()
 			rand := wyhash.New(uint64(tid))
@@ -80,6 +82,7 @@ func parallelDirsTest(
 					}
 					fullName := fmt.Sprintf("%v/%v", ownerIx, entityName(tid, i))
 					log.Debug("creating %q", fullName)
+					allCreated[tid][fullName] = struct{}{}
 					inodes[tid][fullName] = createInode{
 						id:           resp.Id,
 						creationTime: resp.CreationTime,
@@ -97,6 +100,7 @@ func parallelDirsTest(
 					}
 					fullName := fmt.Sprintf("%v/%v", ownerIx, entityName(tid, i))
 					log.Debug("creating file %q", fullName)
+					allCreated[tid][fullName] = struct{}{}
 					inodes[tid][fullName] = createInode{
 						id:           fileResp.Id,
 						creationTime: linkResp.CreationTime,
@@ -204,6 +208,12 @@ func parallelDirsTest(
 			expectedDirs[d] = struct{}{}
 		}
 	}
+	everCreated := make(map[string]struct{})
+	for i := 0; i < opts.numThreads; i++ {
+		for d := range allCreated[i] {
+			everCreated[d] = struct{}{}
+		}
+	}
 	actualDirs := make(map[string]struct{})
 	for i, id := range rootDirs {
 		req := &msgs.ReadDirReq{DirId: id}
@@ -228,10 +238,24 @@ func parallelDirsTest(
 			log.Info("expected to find dir %q, but did not", d)
 		}
 	}
+	extraCount := 0
 	for d := range actualDirs {
 		if _, found := expectedDirs[d]; !found {
+			if _, wasCreated := everCreated[d]; !wasCreated {
+				someErrors = true
+				log.Info("found dir %q that was never created by the test", d)
+			} else {
+				extraCount++
+				log.Info("found extra dir %q (likely from retried create)", d)
+			}
+		}
+	}
+	if extraCount > 0 {
+		// At-least-once delivery with packet drop can cause retried MakeDirectoryReqs
+		// to create duplicates. This should be rare — fail if excessive.
+		log.Info("found %v extra directories from at-least-once delivery", extraCount)
+		if extraCount > len(expectedDirs)/100+1 {
 			someErrors = true
-			log.Info("found dir %q, but did not expect it", d)
 		}
 	}
 	if someErrors {
