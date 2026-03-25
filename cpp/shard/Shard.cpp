@@ -2107,9 +2107,9 @@ public:
 
     virtual bool periodicStep() {
         {
-            LOG_INFO(_env, "Registering ourselves (shard %s, location %s, %s) with registry", _shrid, (int)_location, _shared.sock().addr());
-            // ToDO: once leader election is fully enabled report or leader status instead of value of flag passed on startup
-            const auto [err, errStr] = _shared.registryClient.registerShard(_shrid, _location, _shared.options.isLeader(), _shared.sock().addr());
+            const bool advertiseLeader = _shared.options.isLeader() && (_noReplication || _shared.isInitiated.load(std::memory_order_acquire));
+            LOG_INFO(_env, "Registering ourselves (shard %s, location %s, %s, leader=%s) with registry", _shrid, (int)_location, _shared.sock().addr(), advertiseLeader);
+            const auto [err, errStr] = _shared.registryClient.registerShard(_shrid, _location, advertiseLeader, _shared.sock().addr());
             if (err == EINTR) { return false; }
             if (err) {
                 _env.updateAlert(_alert, "Couldn't register ourselves with registry: %s", errStr);
