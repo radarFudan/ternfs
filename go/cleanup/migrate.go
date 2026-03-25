@@ -495,7 +495,7 @@ func migrateBlocksInternal(
 	badBlock := func(blockService *msgs.BlockService, blockSize uint32, block *msgs.FetchedBlock) (bool, error) {
 		return blockService.Id == blockServiceId, nil
 	}
-	blockNotFoundAlert := log.NewNCAlert(0)
+	blockNotFoundAlert := log.NewNCAlert(time.Hour)
 	defer log.ClearNC(blockNotFoundAlert)
 	for {
 		if err := c.ShardRequest(log, shid, &filesReq, &filesResp); err != nil {
@@ -912,7 +912,7 @@ func (m *migrator) runFileMigrators(wg *sync.WaitGroup) {
 	for range m.numParallelFiles {
 		wg.Go(func() {
 			var scratchFiles [256]scratch.ScratchFile
-			blockNotFoundAlert := m.log.NewNCAlert(0)
+			blockNotFoundAlert := m.log.NewNCAlert(time.Hour)
 			defer func() {
 				for _, tmpFile := range scratchFiles {
 					if tmpFile == nil {

@@ -84,7 +84,7 @@ func scrubWorker(
 	migratingFilesMu *sync.RWMutex,
 ) {
 	bufPool := bufpool.NewBufPool()
-	blockNotFoundAlert := log.NewNCAlert(0)
+	blockNotFoundAlert := log.NewNCAlert(time.Hour)
 	defer log.ClearNC(blockNotFoundAlert)
 	for {
 		req, ok := <-workerChan
