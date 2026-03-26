@@ -1244,6 +1244,8 @@ func createS3ClientFromURL(s3URL string) (client *s3.Client, bucket string) {
 		o.BaseEndpoint = aws.String(endpoint)
 		// Force path-style addressing, which is crucial.
 		o.UsePathStyle = true
+		// Disable checksum validation warnings for non-AWS S3 endpoints.
+		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 	})
 
 	return s3Client, bucket
@@ -1313,6 +1315,7 @@ func fsTest(
 		s3Client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(fmt.Sprintf("http://127.0.0.1:%v", port))
 			o.UsePathStyle = true
+			o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 		})
 		harness := &s3TestHarness{
 			bucket:  "bucket",
